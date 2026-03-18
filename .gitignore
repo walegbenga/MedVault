@@ -8,3 +8,4 @@ coverage.json
 typechain-types/
 # Keep .npmrc in version control — it only contains retry/timeout config, no secrets
 # If you add registry auth tokens, move those to ~/.npmrc instead
+.env.local
