@@ -1,0 +1,31 @@
+{
+  "name": "medvault",
+  "version": "1.0.0",
+  "description": "Patient-Controlled Health Records on Base — smart contract + frontend",
+  "private": true,
+  "scripts": {
+    "compile":         "hardhat compile",
+    "test":            "hardhat test",
+    "test:coverage":   "hardhat coverage",
+    "deploy:testnet":  "hardhat run scripts/deploy.js --network base-sepolia",
+    "deploy:mainnet":  "hardhat run scripts/deploy.js --network base",
+    "verify":          "hardhat verify --network base",
+    "node":            "hardhat node",
+    "clean":           "hardhat clean",
+    "lint:sol":        "solhint 'contracts/**/*.sol'",
+    "size":            "hardhat size-contracts"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox":         "^5.0.0",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.12",
+    "hardhat":                                  "^2.22.0",
+    "chai":                                     "^4.5.0",
+    "ethers":                                   "^6.13.0",
+    "dotenv":                                   "^16.4.7",
+    "solhint":                                  "^5.0.3",
+    "hardhat-contract-sizer":                   "^2.10.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
