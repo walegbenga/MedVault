@@ -15,6 +15,9 @@
     "lint:sol":        "solhint 'contracts/**/*.sol'",
     "size":            "hardhat size-contracts"
   },
+  "dependencies": {
+    "@vercel/node": "^3.0.0"
+  },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox":         "^5.0.0",
     "@nomicfoundation/hardhat-network-helpers": "^1.0.12",

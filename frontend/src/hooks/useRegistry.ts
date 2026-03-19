@@ -4,11 +4,12 @@ import { getContract, parseEventLogs, type Address, type Hash } from 'viem'
 import { keccak256, toUtf8Bytes } from 'ethers'
 import {
   CONTRACT_ABI, CONTRACT_BYTECODE,
-  getContractAddress, saveContractAddress, blobKey,
+  getContractAddress, saveContractAddress,
 } from '@/lib/contract'
 import {
   encrypt, decrypt, encryptAesKeyForGrantee, uint8ToBase64,
 } from '@/lib/crypto'
+import { pinBlob, fetchBlob, updateBlobForGrantee } from '@/lib/ipfs'
 import { store } from '@/lib/store'
 import type { HealthRecord, AccessGrant, TxEntry, AuditEntry, RecordType } from '@/lib/types'
 
@@ -122,12 +123,13 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
       payload = JSON.stringify(parsed)
     }
 
+    // Pin to IPFS via Vercel API (falls back to localStorage in dev)
+    const ipfsCid = await pinBlob(payload, `${params.type}: ${params.title}`)
+
+    // Derive content hash for on-chain anchoring
     const contentHash = keccak256(toUtf8Bytes(payload)) as Hash
-    const ipfsCid = 'Qm' + uint8ToBase64(hexToUint8Array(contentHash))
-      .replace(/[+/=]/g, '').slice(0, 44)
 
-    localStorage.setItem(blobKey(ipfsCid), payload)
-
+    // Send on-chain tx
     const hash = await instance.write.addRecord([contentHash, ipfsCid, params.type, params.title])
     const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
 
@@ -170,7 +172,8 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
   const decryptRecord = useCallback(async (record: HealthRecord): Promise<string> => {
     if (!encKey || !record.iv) return record.notes
     try {
-      const raw = localStorage.getItem(blobKey(record.ipfsCid))
+      // Fetch from IPFS (checks localStorage cache first)
+      const raw = await fetchBlob(record.ipfsCid)
       if (!raw) return record.notes
       const parsed = JSON.parse(raw)
       if (!parsed.enc) return record.notes
@@ -195,16 +198,12 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
     // Encrypt patient AES key for grantee
     const keyEnvelope = await encryptAesKeyForGrantee(encKey, params.granteeSig)
 
-    // Store envelope inside each record blob
+    // Update each record blob with the grantee's key envelope
+    // This re-pins to IPFS so the grantee can fetch it from any browser
     for (const rid of params.recordIds) {
       const rec = records.find(r => r.id === rid)
       if (!rec) continue
-      const blobRaw = localStorage.getItem(blobKey(rec.ipfsCid))
-      if (!blobRaw) continue
-      const blob = JSON.parse(blobRaw)
-      if (!blob.sharedKeys) blob.sharedKeys = {}
-      blob.sharedKeys[params.granteeAddress.toLowerCase()] = keyEnvelope
-      localStorage.setItem(blobKey(rec.ipfsCid), JSON.stringify(blob))
+      await updateBlobForGrantee(rec.ipfsCid, params.granteeAddress, keyEnvelope)
     }
 
     const hash = await instance.write.grantAccess([params.granteeAddress, params.recordIds, expiresAt])

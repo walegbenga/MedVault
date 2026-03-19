@@ -5,8 +5,9 @@ import { Button } from '@/components/ui/Button'
 import { Field, Input } from '@/components/ui/Field'
 import { useToast } from '@/components/ui/Toast'
 import { useGranteeKey } from '@/hooks/useEncryptionKey'
-import { CONTRACT_ABI, blobKey } from '@/lib/contract'
+import { CONTRACT_ABI } from '@/lib/contract'
 import { decryptAesKeyFromEnvelope, decrypt } from '@/lib/crypto'
+import { fetchBlobForGrantee } from '@/lib/ipfs'
 import { targetChain } from '@/lib/wagmi'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
@@ -94,7 +95,7 @@ export function GranteeView() {
       let decrypted = false
 
       try {
-        const blobRaw = localStorage.getItem(`medvault_blob_${ipfsCid}`)
+        const blobRaw = await fetchBlobForGrantee(ipfsCid)
         console.log(`  Blob found: ${!!blobRaw}`)
 
         if (blobRaw) {
