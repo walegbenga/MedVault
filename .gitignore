@@ -8,3 +8,5 @@ typechain-types/
 
 .vercel
 .env.local
+artifacts/
+cache/
