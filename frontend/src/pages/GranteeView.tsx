@@ -322,7 +322,7 @@ export function GranteeView() {
           }}>
             📋 Contract:{' '}
             
-              href={`${EXPLORER}/address/${patientContract}`}
+              <a href={`${EXPLORER}/address/${patientContract}`}
               target="_blank" rel="noreferrer"
               style={{ fontFamily: 'var(--mono)', color: 'var(--teal)', fontSize: '0.75rem' }}
             >
@@ -397,7 +397,7 @@ export function GranteeView() {
                   )}
 
                   
-                    href={`${EXPLORER}/address/${patientContract}`}
+                    <a href={`${EXPLORER}/address/${patientContract}`}
                     target="_blank" rel="noreferrer"
                     style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}
                   >

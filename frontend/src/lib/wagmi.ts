@@ -43,5 +43,3 @@ export const config = createConfig({
     }),
   },
 })
-
-VITE_RPC_URL = https://base-sepolia.g.alchemy.com/v2/yToTHBWBtLysxGoVFnfHp
