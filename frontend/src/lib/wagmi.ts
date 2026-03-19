@@ -16,12 +16,10 @@ export const config = createConfig({
   connectors: [
     injected({ target: 'metaMask' }),
     injected({ shimDisconnect: true }),
-
     coinbaseWallet({
       appName: env.appName,
       appLogoUrl: env.appIcon || undefined,
     }),
-
     walletConnect({
       projectId: env.walletConnectProjectId,
       metadata: {
@@ -38,6 +36,12 @@ export const config = createConfig({
     }),
   ],
   transports: {
-    [targetChain.id]: http(rpcUrl),
+    [targetChain.id]: http(rpcUrl, {
+      batch: true,
+      retryCount: 3,
+      retryDelay: 1000,
+    }),
   },
 })
+
+VITE_RPC_URL = https://base-sepolia.g.alchemy.com/v2/yToTHBWBtLysxGoVFnfHp

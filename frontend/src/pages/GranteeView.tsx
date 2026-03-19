@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useAccount, usePublicClient } from 'wagmi'
-import { getContract, type Address } from 'viem'
+import { getContract, type Address, createPublicClient, http } from 'viem'
+import { baseSepolia, base } from 'wagmi/chains'
 import { Button } from '@/components/ui/Button'
 import { Field, Input } from '@/components/ui/Field'
 import { useToast } from '@/components/ui/Toast'
@@ -9,8 +10,15 @@ import { CONTRACT_ABI } from '@/lib/contract'
 import { decryptAesKeyFromEnvelope, decrypt } from '@/lib/crypto'
 import { fetchBlobForGrantee } from '@/lib/ipfs'
 import { targetChain } from '@/lib/wagmi'
+import { env } from '@/env'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
+
+const rpcUrl = env.rpcUrl || (
+  env.network === 'base'
+    ? 'https://mainnet.base.org'
+    : 'https://sepolia.base.org'
+)
 
 interface SharedRecord {
   id: string
@@ -38,121 +46,126 @@ export function GranteeView() {
   }
 
   const handleCheck = async () => {
-  if (!address || !publicClient || !granteeSig) return
-  if (!/^0x[0-9a-fA-F]{40}$/.test(patientContract)) {
-    toast('warn', 'Enter a valid contract address (0x…)')
-    return
-  }
-
-  setChecking(true)
-  try {
-    // Verify chain
-    const chainId = await publicClient.getChainId()
-    console.log('Chain ID:', chainId, '| Expected:', targetChain.id)
-
-    if (chainId !== targetChain.id) {
-      toast('err', `Wrong network. Please switch to ${targetChain.name} in your wallet.`)
+    if (!address || !granteeSig) return
+    if (!/^0x[0-9a-fA-F]{40}$/.test(patientContract)) {
+      toast('warn', 'Enter a valid contract address (0x…)')
       return
     }
 
-    // Read contract directly — if address is wrong it will throw
-    const contract = getContract({
-      address: patientContract as Address,
-      abi: CONTRACT_ABI,
-      client: publicClient,
-    })
+    setChecking(true)
+    try {
+      // Always create a fresh public client with a reliable RPC
+      // This avoids issues with the wagmi public client using an unreliable RPC
+      const reliableClient = createPublicClient({
+        chain: targetChain,
+        transport: http(rpcUrl, {
+          batch: true,
+          retryCount: 5,
+          retryDelay: 1000,
+        }),
+      })
 
-    const recordCount = await contract.read.getRecordCount() as bigint
-    console.log('Record count:', Number(recordCount))
+      // Verify chain
+      const chainId = await reliableClient.getChainId()
+      console.log('Chain ID:', chainId, '| Expected:', targetChain.id)
 
-    const accessible: SharedRecord[] = []
+      // Read contract
+      const contract = getContract({
+        address: patientContract as Address,
+        abi: CONTRACT_ABI,
+        client: reliableClient,
+      })
 
-    for (let i = 0; i < Number(recordCount); i++) {
-      const rid = await contract.read.recordIds([i]) as `0x${string}`
-      console.log(`Record ${i}:`, rid)
+      const recordCount = await contract.read.getRecordCount() as bigint
+      console.log('Record count:', Number(recordCount))
 
-      const hasAccess = await contract.read.canAccess([address, rid]) as boolean
-      console.log(`  canAccess:`, hasAccess)
-      if (!hasAccess) continue
+      const accessible: SharedRecord[] = []
 
-      const recRaw = await contract.read.records([rid])
-      console.log('  recRaw:', recRaw)
+      for (let i = 0; i < Number(recordCount); i++) {
+        const rid = await contract.read.recordIds([i]) as `0x${string}`
+        console.log(`Record ${i}:`, rid)
 
-      let ipfsCid = ''
-      let recordType = ''
-      let title = ''
-      let active = false
+        const hasAccess = await contract.read.canAccess([address, rid]) as boolean
+        console.log(`  canAccess:`, hasAccess)
+        if (!hasAccess) continue
 
-      if (Array.isArray(recRaw)) {
-        ipfsCid    = recRaw[1] as string
-        recordType = recRaw[2] as string
-        title      = recRaw[3] as string
-        active     = recRaw[5] as boolean
-      } else {
-        const r = recRaw as Record<string, unknown>
-        ipfsCid    = r.ipfsCid    as string
-        recordType = r.recordType as string
-        title      = r.title      as string
-        active     = r.active     as boolean
-      }
+        const recRaw = await contract.read.records([rid])
+        console.log('  recRaw:', recRaw)
 
-      console.log(`  ipfsCid: ${ipfsCid} | active: ${active}`)
-      if (!active) continue
+        let ipfsCid = ''
+        let recordType = ''
+        let title = ''
+        let active = false
 
-      let notes = ''
-      let decrypted = false
-
-      try {
-        const blobRaw = await fetchBlobForGrantee(ipfsCid)
-        console.log(`  Blob found: ${!!blobRaw}`)
-
-        if (blobRaw) {
-          const blob = JSON.parse(blobRaw)
-          console.log('  SharedKeys:', Object.keys(blob.sharedKeys ?? {}))
-
-          const envelope =
-            blob.sharedKeys?.[address.toLowerCase()] ??
-            blob.sharedKeys?.[address]
-
-          console.log(`  Envelope found: ${!!envelope}`)
-
-          if (envelope) {
-            const aesKey = await decryptAesKeyFromEnvelope(envelope, granteeSig)
-            const plain  = await decrypt({ ciphertext: blob.enc, iv: blob.iv }, aesKey)
-            const meta   = JSON.parse(plain)
-            notes     = meta.notes ?? ''
-            decrypted = true
-            console.log('  Decrypted successfully')
-          }
+        if (Array.isArray(recRaw)) {
+          ipfsCid    = recRaw[1] as string
+          recordType = recRaw[2] as string
+          title      = recRaw[3] as string
+          active     = recRaw[5] as boolean
+        } else {
+          const r = recRaw as Record<string, unknown>
+          ipfsCid    = r.ipfsCid    as string
+          recordType = r.recordType as string
+          title      = r.title      as string
+          active     = r.active     as boolean
         }
-      } catch (decryptErr) {
-        console.warn('  Decryption failed:', decryptErr)
+
+        console.log(`  ipfsCid: ${ipfsCid} | active: ${active}`)
+        if (!active) continue
+
+        let notes = ''
+        let decrypted = false
+
+        try {
+          const blobRaw = await fetchBlobForGrantee(ipfsCid)
+          console.log(`  Blob found: ${!!blobRaw}`)
+
+          if (blobRaw) {
+            const blob = JSON.parse(blobRaw)
+            console.log('  SharedKeys:', Object.keys(blob.sharedKeys ?? {}))
+
+            const envelope =
+              blob.sharedKeys?.[address.toLowerCase()] ??
+              blob.sharedKeys?.[address]
+
+            console.log(`  Envelope found: ${!!envelope}`)
+
+            if (envelope) {
+              const aesKey = await decryptAesKeyFromEnvelope(envelope, granteeSig)
+              const plain  = await decrypt({ ciphertext: blob.enc, iv: blob.iv }, aesKey)
+              const meta   = JSON.parse(plain)
+              notes     = meta.notes ?? ''
+              decrypted = true
+              console.log('  Decrypted successfully')
+            }
+          }
+        } catch (decryptErr) {
+          console.warn('  Decryption failed:', decryptErr)
+        }
+
+        accessible.push({ id: rid, ipfsCid, type: recordType, title, notes, decrypted })
       }
 
-      accessible.push({ id: rid, ipfsCid, type: recordType, title, notes, decrypted })
-    }
+      console.log('Total accessible:', accessible.length)
+      setRecords(accessible)
+      setStep('view')
 
-    console.log('Total accessible:', accessible.length)
-    setRecords(accessible)
-    setStep('view')
-
-    if (accessible.length === 0) {
-      toast('warn', `Found ${Number(recordCount)} record(s) but none accessible to your wallet ${address.slice(0,6)}…${address.slice(-4)}`)
-    } else {
-      toast('ok', `Found ${accessible.length} accessible record${accessible.length !== 1 ? 's' : ''}.`)
+      if (accessible.length === 0) {
+        toast('warn', `Found ${Number(recordCount)} record(s) but none are accessible to your wallet ${address.slice(0,6)}…${address.slice(-4)}`)
+      } else {
+        toast('ok', `Found ${accessible.length} accessible record${accessible.length !== 1 ? 's' : ''}.`)
+      }
+    } catch (e: unknown) {
+      console.error('handleCheck error:', e)
+      const msg = e instanceof Error ? e.message : 'Failed to check access'
+      console.error('Full error message:', msg)
+      console.error('Contract address:', patientContract)
+      console.error('RPC URL:', rpcUrl)
+      toast('err', msg.length > 120 ? msg.slice(0, 120) + '…' : msg)
+    } finally {
+      setChecking(false)
     }
-  } catch (e: unknown) {
-    console.error('handleCheck error:', e)
-    const msg = e instanceof Error ? e.message : 'Failed to check access'
-    if (msg.includes('getRecordCount') || msg.includes('returned no data') || msg.includes('0x')) {
-      toast('err', `Could not read contract at ${patientContract.slice(0,10)}… — make sure you are on ${targetChain.name} and the address is correct.`)
-    } else {
-      toast('err', msg)
-    }
-  } finally {
-    setChecking(false)
   }
-}
 
   const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`
 
@@ -222,7 +235,7 @@ export function GranteeView() {
         })}
       </div>
 
-      {/* Signature display — show after signing */}
+      {/* Signature display */}
       {granteeSig && step !== 'sign' && (
         <div style={{
           background: 'var(--s1)', border: '1px solid var(--border2)',
@@ -251,7 +264,7 @@ export function GranteeView() {
         </div>
       )}
 
-      {/* Step 1 — Sign */}
+      {/* Step 1 */}
       {step === 'sign' && (
         <div style={S.card}>
           <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>
@@ -266,19 +279,18 @@ export function GranteeView() {
         </div>
       )}
 
-      {/* Step 2 — Enter contract */}
+      {/* Step 2 */}
       {step === 'enter' && (
         <div style={S.card}>
           <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>
             Step 2: Enter the patient's contract address
           </h3>
           <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65, marginBottom: '1.25rem' }}>
-            Ask the patient to click <strong>"📋 Copy for Grantee"</strong> in their dashboard and
-            send you the address. Paste it below.
+            Ask the patient to click <strong>"📋 Copy for Grantee"</strong> in their dashboard
+            and send you the address. Paste it below.
           </p>
           <div style={S.infoAmber}>
-            ⚠ Make sure you are connected to <strong>{targetChain.name}</strong> in your wallet
-            before checking access.
+            ⚠ Make sure you are connected to <strong>{targetChain.name}</strong> before checking.
           </div>
           <Field label="Patient's Registry Contract Address" required>
             <Input
@@ -294,7 +306,7 @@ export function GranteeView() {
         </div>
       )}
 
-      {/* Step 3 — View records */}
+      {/* Step 3 */}
       {step === 'view' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
@@ -310,7 +322,7 @@ export function GranteeView() {
           }}>
             📋 Contract:{' '}
             
-              <a href={`${EXPLORER}/address/${patientContract}`}
+              href={`${EXPLORER}/address/${patientContract}`}
               target="_blank" rel="noreferrer"
               style={{ fontFamily: 'var(--mono)', color: 'var(--teal)', fontSize: '0.75rem' }}
             >
@@ -385,7 +397,7 @@ export function GranteeView() {
                   )}
 
                   
-                    <a href={`${EXPLORER}/address/${patientContract}`}
+                    href={`${EXPLORER}/address/${patientContract}`}
                     target="_blank" rel="noreferrer"
                     style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}
                   >
