@@ -43,6 +43,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let blobObj: Record<string, unknown>
 
     try {
+      // The legacy pinJSONToIPFS stores the content directly
+      // so the response is the JSON object itself
       blobObj = JSON.parse(existingText)
     } catch {
       return res.status(422).json({ error: 'Existing blob is not valid JSON' })
@@ -54,19 +56,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     ;(blobObj.sharedKeys as Record<string, unknown>)[granteeAddress.toLowerCase()] = keyEnvelope
 
-    // 3. Re-pin updated blob using new Pinata API
-    const updatedPayload = JSON.stringify(blobObj)
-    const blob = new Blob([updatedPayload], { type: 'application/json' })
-    const formData = new FormData()
-    formData.append('file', blob, `medvault-updated-${Date.now()}.json`)
-    formData.append('network', 'public')
-
-    const pinResponse = await fetch('https://uploads.pinata.cloud/v3/files', {
+    // 3. Re-pin updated blob using legacy endpoint
+    const pinResponse = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
       method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         'Authorization': `Bearer ${jwt}`,
       },
-      body: formData,
+      body: JSON.stringify({
+        pinataContent: blobObj,
+        pinataMetadata: {
+          name: `medvault-updated-${Date.now()}`,
+        },
+        pinataOptions: {
+          cidVersion: 0,
+        },
+      }),
     })
 
     if (!pinResponse.ok) {
@@ -74,9 +79,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(502).json({ error: 'Re-pin failed', detail: err })
     }
 
-    const pinData = await pinResponse.json() as { data: { cid: string } }
+    const pinData = await pinResponse.json() as { IpfsHash: string }
 
-    return res.status(200).json({ newCid: pinData.data.cid })
+    return res.status(200).json({ newCid: pinData.IpfsHash })
   } catch (e: unknown) {
     console.error('update-blob error:', e)
     return res.status(500).json({ error: e instanceof Error ? e.message : 'Internal error' })

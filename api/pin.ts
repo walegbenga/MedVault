@@ -17,34 +17,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'Missing payload' })
     }
 
-    // Pinata new API — upload as a file
-    const blob = new Blob([payload], { type: 'application/json' })
-    const formData = new FormData()
-    formData.append('file', blob, name ?? `medvault-${Date.now()}.json`)
-    formData.append('network', 'public')
-
-    const pinResponse = await fetch('https://uploads.pinata.cloud/v3/files', {
+    // Use legacy pinJSONToIPFS endpoint — still fully supported
+    const pinResponse = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
       method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         'Authorization': `Bearer ${jwt}`,
       },
-      body: formData,
+      body: JSON.stringify({
+        pinataContent: JSON.parse(payload),
+        pinataMetadata: {
+          name: name ?? `medvault-${Date.now()}`,
+        },
+        pinataOptions: {
+          cidVersion: 0,
+        },
+      }),
     })
 
     if (!pinResponse.ok) {
       const err = await pinResponse.text()
-      console.error('Pinata pin error:', err)
+      console.error('Pinata error:', err)
       return res.status(502).json({ error: 'Pinata pinning failed', detail: err })
     }
 
-    const pinData = await pinResponse.json() as { data: { cid: string; size: number } }
+    const data = await pinResponse.json() as { IpfsHash: string; PinSize: number }
 
-    return res.status(200).json({
-      cid:     pinData.data.cid,
-      pinSize: pinData.data.size,
-    })
+    return res.status(200).json({ cid: data.IpfsHash, pinSize: data.PinSize })
   } catch (e: unknown) {
-    console.error('Pin handler error:', e)
+    console.error('Pin error:', e)
     return res.status(500).json({ error: e instanceof Error ? e.message : 'Internal error' })
   }
 }
