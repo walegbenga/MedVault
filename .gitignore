@@ -10,3 +10,6 @@ typechain-types/
 .env.local
 artifacts/
 cache/
+.env.local
+artifacts/
+cache/
