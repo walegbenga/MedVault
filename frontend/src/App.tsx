@@ -249,8 +249,8 @@ function AppInner() {
 
       {/* ── Patient: dashboard ── */}
       {isConnected && !wrongChain && role === 'patient' && (reg.contractAddress || reg.deploying) && (
-        <Dashboard encKey={encKey} encSig={encSig} encError={encError} />
-      )}
+  <Dashboard encKey={encKey} encSig={encSig} encError={encError} reg={reg} />
+)}
 
       {/* ── Grantee view ── */}
       {isConnected && !wrongChain && role === 'grantee' && (

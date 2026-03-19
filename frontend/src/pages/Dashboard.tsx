@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { Field, Input, Select, Textarea } from '@/components/ui/Field'
 import { useToast } from '@/components/ui/Toast'
-import { useRegistry } from '@/hooks/useRegistry'
+import type { useRegistry } from '@/hooks/useRegistry'
 import type { HealthRecord, AccessGrant } from '@/lib/types'
 import { targetChain } from '@/lib/wagmi'
 
@@ -44,12 +44,16 @@ function Empty({ icon, title, desc }: { icon: string; title: string; desc: strin
   )
 }
 
-interface Props { encKey: CryptoKey | null; encSig?: string | null; encError: string | null }
+interface Props {
+  encKey: CryptoKey | null
+  encSig?: string | null
+  encError: string | null
+  reg: ReturnType<typeof useRegistry>
+}
 
-export function Dashboard({ encKey, encSig, encError }: Props) {
+export function Dashboard({ encKey, encSig, encError, reg }: Props) {
   const { address } = useAccount()
   const { toast } = useToast()
-  const reg = useRegistry(encKey, encSig)
   const [tab, setTab] = useState<Tab>('records')
 
   const [uploadOpen, setUploadOpen]     = useState(false)
@@ -404,7 +408,14 @@ export function Dashboard({ encKey, encSig, encError }: Props) {
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
           <Button variant="outline" onClick={() => setGrantOpen(false)}>Cancel</Button>
-          <Button variant="success" loading={grantLoading} onClick={handleGrant}>📜 Sign & Grant on Base</Button>
+          <Button 
+  variant="success" 
+  loading={grantLoading} 
+  onClick={handleGrant}
+  disabled={!encKey}
+>
+  {encKey ? '📜 Sign & Grant on Base' : '🔑 Waiting for encryption key…'}
+</Button>
         </div>
       </Modal>
 
