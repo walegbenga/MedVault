@@ -38,133 +38,121 @@ export function GranteeView() {
   }
 
   const handleCheck = async () => {
-    if (!address || !publicClient || !granteeSig) return
-    if (!/^0x[0-9a-fA-F]{40}$/.test(patientContract)) {
-      toast('warn', 'Enter a valid contract address (0x…)')
+  if (!address || !publicClient || !granteeSig) return
+  if (!/^0x[0-9a-fA-F]{40}$/.test(patientContract)) {
+    toast('warn', 'Enter a valid contract address (0x…)')
+    return
+  }
+
+  setChecking(true)
+  try {
+    // Verify chain
+    const chainId = await publicClient.getChainId()
+    console.log('Chain ID:', chainId, '| Expected:', targetChain.id)
+
+    if (chainId !== targetChain.id) {
+      toast('err', `Wrong network. Please switch to ${targetChain.name} in your wallet.`)
       return
     }
 
-    setChecking(true)
-    try {
-      // Step 1: verify chain
-      const chainId = await publicClient.getChainId()
-      console.log('Chain ID:', chainId, '| Expected:', targetChain.id)
+    // Read contract directly — if address is wrong it will throw
+    const contract = getContract({
+      address: patientContract as Address,
+      abi: CONTRACT_ABI,
+      client: publicClient,
+    })
 
-      if (chainId !== targetChain.id) {
-        toast('err', `Wrong network. Please switch to ${targetChain.name} in your wallet.`)
-        return
+    const recordCount = await contract.read.getRecordCount() as bigint
+    console.log('Record count:', Number(recordCount))
+
+    const accessible: SharedRecord[] = []
+
+    for (let i = 0; i < Number(recordCount); i++) {
+      const rid = await contract.read.recordIds([i]) as `0x${string}`
+      console.log(`Record ${i}:`, rid)
+
+      const hasAccess = await contract.read.canAccess([address, rid]) as boolean
+      console.log(`  canAccess:`, hasAccess)
+      if (!hasAccess) continue
+
+      const recRaw = await contract.read.records([rid])
+      console.log('  recRaw:', recRaw)
+
+      let ipfsCid = ''
+      let recordType = ''
+      let title = ''
+      let active = false
+
+      if (Array.isArray(recRaw)) {
+        ipfsCid    = recRaw[1] as string
+        recordType = recRaw[2] as string
+        title      = recRaw[3] as string
+        active     = recRaw[5] as boolean
+      } else {
+        const r = recRaw as Record<string, unknown>
+        ipfsCid    = r.ipfsCid    as string
+        recordType = r.recordType as string
+        title      = r.title      as string
+        active     = r.active     as boolean
       }
 
-      // Step 2: verify contract bytecode exists at address
-      const code = await publicClient.getBytecode({
-        address: patientContract as Address,
-      })
-      console.log('Bytecode exists:', !!code, '| Length:', code?.length)
+      console.log(`  ipfsCid: ${ipfsCid} | active: ${active}`)
+      if (!active) continue
 
-      if (!code || code === '0x') {
-        toast('err', `No contract found at ${patientContract} on ${targetChain.name}. Check the address.`)
-        return
-      }
+      let notes = ''
+      let decrypted = false
 
-      // Step 3: read contract
-      const contract = getContract({
-        address: patientContract as Address,
-        abi: CONTRACT_ABI,
-        client: publicClient,
-      })
+      try {
+        const blobRaw = await fetchBlobForGrantee(ipfsCid)
+        console.log(`  Blob found: ${!!blobRaw}`)
 
-      const recordCount = await contract.read.getRecordCount() as bigint
-      console.log('Record count:', Number(recordCount))
+        if (blobRaw) {
+          const blob = JSON.parse(blobRaw)
+          console.log('  SharedKeys:', Object.keys(blob.sharedKeys ?? {}))
 
-      const accessible: SharedRecord[] = []
+          const envelope =
+            blob.sharedKeys?.[address.toLowerCase()] ??
+            blob.sharedKeys?.[address]
 
-      for (let i = 0; i < Number(recordCount); i++) {
-        const rid = await contract.read.recordIds([i]) as `0x${string}`
-        console.log(`Record ${i}:`, rid)
+          console.log(`  Envelope found: ${!!envelope}`)
 
-        const hasAccess = await contract.read.canAccess([address, rid]) as boolean
-        console.log(`  canAccess:`, hasAccess)
-        if (!hasAccess) continue
-
-        // Fetch record as array tuple
-        const recRaw = await contract.read.records([rid])
-        console.log('  recRaw:', recRaw)
-
-        let ipfsCid = ''
-        let recordType = ''
-        let title = ''
-        let active = false
-
-        if (Array.isArray(recRaw)) {
-          ipfsCid    = recRaw[1] as string
-          recordType = recRaw[2] as string
-          title      = recRaw[3] as string
-          active     = recRaw[5] as boolean
-        } else {
-          const r = recRaw as Record<string, unknown>
-          ipfsCid    = r.ipfsCid    as string
-          recordType = r.recordType as string
-          title      = r.title      as string
-          active     = r.active     as boolean
-        }
-
-        console.log(`  ipfsCid: ${ipfsCid} | active: ${active}`)
-        if (!active) continue
-
-        let notes = ''
-        let decrypted = false
-
-        try {
-          const blobRaw = await fetchBlobForGrantee(ipfsCid)
-          console.log(`  Blob found: ${!!blobRaw}`)
-
-          if (blobRaw) {
-            const blob = JSON.parse(blobRaw)
-            console.log('  SharedKeys:', Object.keys(blob.sharedKeys ?? {}))
-
-            const envelope =
-              blob.sharedKeys?.[address.toLowerCase()] ??
-              blob.sharedKeys?.[address]
-
-            console.log(`  Envelope found: ${!!envelope}`)
-
-            if (envelope) {
-              const aesKey = await decryptAesKeyFromEnvelope(envelope, granteeSig)
-              const plain  = await decrypt({ ciphertext: blob.enc, iv: blob.iv }, aesKey)
-              const meta   = JSON.parse(plain)
-              notes     = meta.notes ?? ''
-              decrypted = true
-              console.log('  Decrypted successfully')
-            }
+          if (envelope) {
+            const aesKey = await decryptAesKeyFromEnvelope(envelope, granteeSig)
+            const plain  = await decrypt({ ciphertext: blob.enc, iv: blob.iv }, aesKey)
+            const meta   = JSON.parse(plain)
+            notes     = meta.notes ?? ''
+            decrypted = true
+            console.log('  Decrypted successfully')
           }
-        } catch (decryptErr) {
-          console.warn('  Decryption failed:', decryptErr)
         }
-
-        accessible.push({ id: rid, ipfsCid, type: recordType, title, notes, decrypted })
+      } catch (decryptErr) {
+        console.warn('  Decryption failed:', decryptErr)
       }
 
-      console.log('Total accessible:', accessible.length)
-      setRecords(accessible)
-      setStep('view')
-
-      if (accessible.length === 0) {
-        toast('warn', `Found ${Number(recordCount)} record(s) but none accessible to your wallet ${address.slice(0,6)}…${address.slice(-4)}`)
-      } else {
-        toast('ok', `Found ${accessible.length} accessible record${accessible.length !== 1 ? 's' : ''}.`)
-      }
-    } catch (e: unknown) {
-      console.error('handleCheck error:', e)
-      const msg = e instanceof Error ? e.message : 'Failed to check access'
-      if (msg.includes('getRecordCount') || msg.includes('returned no data') || msg.includes('0x')) {
-        toast('err', `Not a valid MedVault registry at that address on ${targetChain.name}. Please verify the contract address.`)
-      } else {
-        toast('err', msg)
-      }
-    } finally {
-      setChecking(false)
+      accessible.push({ id: rid, ipfsCid, type: recordType, title, notes, decrypted })
     }
+
+    console.log('Total accessible:', accessible.length)
+    setRecords(accessible)
+    setStep('view')
+
+    if (accessible.length === 0) {
+      toast('warn', `Found ${Number(recordCount)} record(s) but none accessible to your wallet ${address.slice(0,6)}…${address.slice(-4)}`)
+    } else {
+      toast('ok', `Found ${accessible.length} accessible record${accessible.length !== 1 ? 's' : ''}.`)
+    }
+  } catch (e: unknown) {
+    console.error('handleCheck error:', e)
+    const msg = e instanceof Error ? e.message : 'Failed to check access'
+    if (msg.includes('getRecordCount') || msg.includes('returned no data') || msg.includes('0x')) {
+      toast('err', `Could not read contract at ${patientContract.slice(0,10)}… — make sure you are on ${targetChain.name} and the address is correct.`)
+    } else {
+      toast('err', msg)
+    }
+  } finally {
+    setChecking(false)
   }
+}
 
   const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`
 
