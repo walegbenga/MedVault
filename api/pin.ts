@@ -17,7 +17,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'Missing payload' })
     }
 
-    // Use legacy pinJSONToIPFS endpoint — still fully supported
+    // Wrap the raw payload string inside a JSON object
+    // pinataContent must be a plain JSON object — we store the
+    // encrypted string under a "data" key
+    const pinataContent = { data: payload }
+
     const pinResponse = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
       method: 'POST',
       headers: {
@@ -25,7 +29,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         'Authorization': `Bearer ${jwt}`,
       },
       body: JSON.stringify({
-        pinataContent: JSON.parse(payload),
+        pinataContent,
         pinataMetadata: {
           name: name ?? `medvault-${Date.now()}`,
         },
@@ -35,13 +39,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }),
     })
 
+    const responseText = await pinResponse.text()
+    console.log('Pinata response status:', pinResponse.status)
+    console.log('Pinata response body:', responseText)
+
     if (!pinResponse.ok) {
-      const err = await pinResponse.text()
-      console.error('Pinata error:', err)
-      return res.status(502).json({ error: 'Pinata pinning failed', detail: err })
+      return res.status(502).json({ error: 'Pinata pinning failed', detail: responseText })
     }
 
-    const data = await pinResponse.json() as { IpfsHash: string; PinSize: number }
+    const data = JSON.parse(responseText) as { IpfsHash: string; PinSize: number }
 
     return res.status(200).json({ cid: data.IpfsHash, pinSize: data.PinSize })
   } catch (e: unknown) {

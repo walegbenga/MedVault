@@ -38,11 +38,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const text = await fetchRes.text()
+let payload: string
 
-    res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+try {
+  // Try to parse as JSON object with data key (new format)
+  const parsed = JSON.parse(text) as { data?: string }
+  payload = parsed.data ?? text
+} catch {
+  // Fall back to raw text
+  payload = text
+}
 
-    return res.status(200).json({ payload: text })
+res.setHeader('Access-Control-Allow-Origin', '*')
+res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+return res.status(200).json({ payload })
   } catch (e: unknown) {
     console.error('Blob fetch error:', e)
     return res.status(500).json({ error: e instanceof Error ? e.message : 'Internal error' })
