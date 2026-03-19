@@ -143,11 +143,19 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
           <p style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text3)', marginTop: 4 }}>{address} · {targetChain.name}</p>
         </div>
         {reg.contractAddress && (
-          <a href={`${EXPLORER}/address/${reg.contractAddress}`} target="_blank" rel="noreferrer"
-            style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', padding: '0.4rem 0.85rem', borderRadius: 9, background: 'var(--s1)', border: '1px solid var(--border)', color: 'var(--teal)', textDecoration: 'none' }}>
-            Registry: {short(reg.contractAddress)} ↗
-          </a>
-        )}
+  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+    <a href={`${EXPLORER}/address/${reg.contractAddress}`} target="_blank" rel="noreferrer"
+      style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', padding: '0.4rem 0.85rem', borderRadius: 9, background: 'var(--s1)', border: '1px solid var(--border)', color: 'var(--teal)', textDecoration: 'none' }}>
+      Registry: {short(reg.contractAddress)} ↗
+    </a>
+    <button
+      onClick={() => navigator.clipboard.writeText(reg.contractAddress!).then(() => toast('ok', 'Contract address copied!'))}
+      style={{ fontSize: '0.72rem', padding: '0.4rem 0.85rem', borderRadius: 9, background: 'var(--s1)', border: '1px solid var(--border)', color: 'var(--text2)', cursor: 'pointer', fontFamily: 'var(--font)' }}
+    >
+      📋 Copy for Grantee
+    </button>
+  </div>
+)}
       </div>
 
       {encError && <div style={{ ...S.infoAmber, marginBottom: '1.25rem' }}>⚠ {encError}</div>}
