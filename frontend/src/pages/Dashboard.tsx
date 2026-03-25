@@ -8,6 +8,7 @@ import { useToast } from '@/components/ui/Toast'
 import type { useRegistry } from '@/hooks/useRegistry'
 import type { HealthRecord, AccessGrant } from '@/lib/types'
 import { targetChain } from '@/lib/wagmi'
+import { useIsMobile } from '@/hooks/useIsMobile'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
 type Tab = 'records' | 'access' | 'txns' | 'audit'
@@ -68,6 +69,8 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
 
   const [viewRecord, setViewRecord]     = useState<HealthRecord | null>(null)
   const [viewNotes, setViewNotes]       = useState('')
+
+  const isMobile = useIsMobile()
 
   const openView = async (r: HealthRecord) => {
     setViewRecord(r)
@@ -137,7 +140,8 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
     <div style={{ maxWidth: 1180, margin: '0 auto', padding: '1.5rem' }}>
 
       {/* Top bar */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem', marginBottom: '1.5rem' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: isMobile ? 'flex-start' : 'space-between',
+flexDirection: isMobile ? 'column' as const : 'row' as const, gap: '1rem', marginBottom: '1.5rem' }}>
         <div>
           <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.6rem', fontWeight: 800, letterSpacing: '-0.02em' }}>Health Records</h2>
           <p style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text3)', marginTop: 4 }}>{address} · {targetChain.name}</p>
@@ -162,7 +166,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
       {!encKey && !encError && <div style={{ ...S.infoTeal, marginBottom: '1.25rem' }}>🔑 Waiting for encryption key signature…</div>}
 
       {/* Stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.875rem', marginBottom: '1.5rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '0.875rem', marginBottom: '1.5rem' }}>
         {[
           { label: 'Records',       value: reg.records.length, color: 'var(--teal)',  sub: 'encrypted on-chain' },
           { label: 'Active Grants', value: reg.grants.length,  color: 'var(--green)', sub: 'live permissions' },
@@ -179,7 +183,8 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: '0.2rem', background: 'var(--s1)', border: '1px solid var(--border)', borderRadius: 10, padding: '0.2rem', width: 'fit-content', marginBottom: '1.25rem' }}>
+      <div style={{ display: 'flex', gap: '0.2rem', background: 'var(--s1)', border: '1px solid var(--border)', borderRadius: 10, padding: '0.2rem', width: isMobile ? '100%' : 'fit-content',
+overflowX: 'auto' as const, marginBottom: '1.25rem' }}>
         {TABS.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{ fontFamily: 'var(--font)', fontSize: '0.82rem', fontWeight: 500, padding: '0.42rem 0.9rem', borderRadius: 7, cursor: 'pointer', background: tab === t.id ? 'var(--s3)' : 'transparent', color: tab === t.id ? 'var(--text)' : 'var(--text3)', border: tab === t.id ? '1px solid var(--border2)' : '1px solid transparent', transition: 'all 0.15s' }}>
             {t.label}
@@ -197,7 +202,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
           {reg.records.length === 0
             ? <Empty icon="🗂" title="No records yet" desc="Upload your first health record to encrypt and anchor on Base." />
             : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '0.9rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: '0.9rem' }}>
                 {reg.records.map((r, i) => (
                   <div key={r.id} style={{ ...S.card, padding: '1.1rem', animation: `fadeUp 0.22s ease ${i * 0.04}s both` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.65rem' }}>
@@ -338,7 +343,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
             {RECORD_TYPES.map(t => <option key={t}>{t}</option>)}
           </Select>
         </Field>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '0.75rem' }}>
           <Field label="Title" required>
             <Input value={uploadForm.title} placeholder="e.g. Blood Panel Q4" onChange={e => setUploadForm(p => ({ ...p, title: e.target.value }))} />
           </Field>
@@ -439,7 +444,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
               <div style={{ fontSize: '0.75rem', color: 'var(--text2)', marginBottom: '0.2rem' }}>Title</div>
               <div style={{ fontWeight: 600 }}>{viewRecord.title}</div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '1rem' }}>
               <div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text2)', marginBottom: '0.2rem' }}>Provider</div>
                 <div style={{ fontSize: '0.875rem' }}>{viewRecord.provider}</div>

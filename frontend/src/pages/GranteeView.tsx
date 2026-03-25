@@ -10,6 +10,7 @@ import { decryptAesKeyFromEnvelope, decrypt } from '@/lib/crypto'
 import { fetchBlob } from '@/lib/ipfs'
 import { targetChain } from '@/lib/wagmi'
 import { env } from '@/env'
+import { useIsMobile } from '@/hooks/useIsMobile'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
 
@@ -37,6 +38,8 @@ export function GranteeView() {
   const [checking, setChecking] = useState(false)
   const [records, setRecords]   = useState<SharedRecord[]>([])
   const [step, setStep]         = useState<'sign' | 'enter' | 'view'>('sign')
+
+  const isMobile = useIsMobile()
 
   const handleSign = async () => {
     const sig = await deriveGranteeKey()
@@ -231,9 +234,11 @@ export function GranteeView() {
                 }}>
                   {isDone ? '✓' : s.n}
                 </div>
-                <span style={{ fontSize: '0.8rem', color: isActive ? 'var(--text)' : 'var(--text3)' }}>
-                  {s.label}
-                </span>
+                {!isMobile && (
+  <span style={{ fontSize: '0.8rem', color: isActive ? 'var(--text)' : 'var(--text3)' }}>
+    {s.label}
+  </span>
+)}
               </div>
               {i < 2 && <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />}
             </React.Fragment>
@@ -352,7 +357,7 @@ export function GranteeView() {
           ) : (
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+              gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))',
               gap: '0.9rem',
             }}>
               {records.map((r, i) => (

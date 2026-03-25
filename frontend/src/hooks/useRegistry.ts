@@ -268,10 +268,165 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
     addAudit({ color: 'red', msg: `Access revoked: ${g?.name} (${g?.role}) | block ${receipt.blockNumber.toString()}`, onChain: true, txHash: hash })
   }, [address, contractAddress, publicClient, grants, getInstance, addTx, addAudit])
 
+
+  // ── recoverFromChain ──────────────────────────────────────────────────────
+const recoverFromChain = useCallback(async (contractAddr: Address) => {
+  if (!address || !publicClient) throw new Error('Not connected')
+
+  console.log('Recovering from chain for:', contractAddr)
+
+  try {
+    // Fetch all RecordAdded events
+    const recordLogs = await publicClient.getLogs({
+      address: contractAddr,
+      event: {
+        type: 'event',
+        name: 'RecordAdded',
+        inputs: [
+          { indexed: true,  name: 'id',         type: 'bytes32' },
+          { indexed: false, name: 'ipfsCid',    type: 'string'  },
+          { indexed: false, name: 'recordType', type: 'string'  },
+          { indexed: false, name: 'title',      type: 'string'  },
+          { indexed: false, name: 'timestamp',  type: 'uint256' },
+        ],
+      },
+      fromBlock: 0n,
+      toBlock: 'latest',
+    })
+
+    // Fetch all RecordRemoved events
+    const removedLogs = await publicClient.getLogs({
+      address: contractAddr,
+      event: {
+        type: 'event',
+        name: 'RecordRemoved',
+        inputs: [
+          { indexed: true, name: 'id', type: 'bytes32' },
+        ],
+      },
+      fromBlock: 0n,
+      toBlock: 'latest',
+    })
+
+    // Fetch all AccessGranted events
+    const grantLogs = await publicClient.getLogs({
+      address: contractAddr,
+      event: {
+        type: 'event',
+        name: 'AccessGranted',
+        inputs: [
+          { indexed: true,  name: 'grantId',   type: 'uint256'  },
+          { indexed: true,  name: 'grantee',   type: 'address'  },
+          { indexed: false, name: 'recordIds', type: 'bytes32[]' },
+          { indexed: false, name: 'expiresAt', type: 'uint256'  },
+        ],
+      },
+      fromBlock: 0n,
+      toBlock: 'latest',
+    })
+
+    // Fetch all AccessRevoked events
+    const revokedLogs = await publicClient.getLogs({
+      address: contractAddr,
+      event: {
+        type: 'event',
+        name: 'AccessRevoked',
+        inputs: [
+          { indexed: true, name: 'grantId', type: 'uint256' },
+          { indexed: true, name: 'grantee', type: 'address' },
+        ],
+      },
+      fromBlock: 0n,
+      toBlock: 'latest',
+    })
+
+    // Build removed set
+    const removedIds = new Set(
+      removedLogs.map(l => (l.topics[1] as string).toLowerCase())
+    )
+
+    // Rebuild records
+    const recovered: HealthRecord[] = recordLogs
+      .filter(l => !removedIds.has((l.topics[1] as string).toLowerCase()))
+      .map(l => {
+        const id         = l.topics[1] as Hash
+        const ipfsCid    = l.args.ipfsCid    as string
+        const type       = l.args.recordType as RecordType
+        const title      = l.args.title      as string
+        const timestamp  = Number(l.args.timestamp as bigint) * 1000
+
+        return serialize({
+          id,
+          ipfsCid,
+          type,
+          title,
+          provider: 'Unknown',
+          date: new Date(timestamp).toISOString().split('T')[0],
+          notes: '',
+          txHash: l.transactionHash as Hash,
+          blockNumber: l.blockNumber.toString(),
+          encrypted: true,
+          accessCount: 0,
+          ts: timestamp,
+        }) as HealthRecord
+      })
+
+    // Build revoked set
+    const revokedIds = new Set(
+      revokedLogs.map(l => (l.topics[1] as string).toLowerCase())
+    )
+
+    // Rebuild grants
+    const recovered_grants: AccessGrant[] = grantLogs
+      .filter(l => !revokedIds.has((l.topics[1] as string).toLowerCase()))
+      .map(l => {
+        const grantId   = Number(l.topics[1] as string)
+        const grantee   = l.topics[2] as Address
+        const recordIds = l.args.recordIds as Hash[]
+        const expiresAt = (l.args.expiresAt as bigint).toString()
+
+        return serialize({
+          grantId,
+          name:      grantee,
+          address:   grantee,
+          role:      'Unknown',
+          purpose:   '',
+          recordIds,
+          titles:    recordIds.map(r => r.slice(0, 10) + '…'),
+          expiry:    null,
+          expiresAt,
+          txHash:    l.transactionHash as Hash,
+          blockNumber: l.blockNumber.toString(),
+          ts:        Date.now(),
+        }) as AccessGrant
+      })
+
+    // Save to localStorage
+    store.records.save(address, recovered)
+    store.grants.save(address, recovered_grants)
+    setRecords(recovered)
+    setGrants(recovered_grants)
+
+    addAudit({
+      color: 'teal',
+      msg: `Recovered ${recovered.length} record(s) and ${recovered_grants.length} grant(s) from chain`,
+      onChain: false,
+    })
+
+    console.log('Recovery complete:', recovered.length, 'records,', recovered_grants.length, 'grants')
+    return { records: recovered, grants: recovered_grants }
+
+  } catch (e) {
+    console.error('Recovery failed:', e)
+    throw e
+  }
+}, [address, publicClient, addAudit])
+
   return {
     contractAddress, records, grants, txLog, auditLog,
     deploying, deployStep,
     deployRegistry, uploadRecord, removeRecord,
     decryptRecord, grantAccess, revokeAccess,
+    recoverFromChain,
   }
 }
