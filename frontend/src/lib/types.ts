@@ -21,7 +21,6 @@ export interface HealthRecord {
   txHash: Hash
   blockNumber: string
   encrypted: boolean
-  iv?: string
   accessCount: number
   ts: number
 }

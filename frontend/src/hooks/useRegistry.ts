@@ -7,19 +7,11 @@ import {
   getContractAddress, saveContractAddress,
 } from '@/lib/contract'
 import {
-  encrypt, decrypt, encryptAesKeyForGrantee, uint8ToBase64,
+  encrypt, decrypt, encryptAesKeyForGrantee,
 } from '@/lib/crypto'
-import { pinBlob, fetchBlob, updateBlobForGrantee } from '@/lib/ipfs'
+import { pinBlob, fetchBlob } from '@/lib/ipfs'
 import { store } from '@/lib/store'
 import type { HealthRecord, AccessGrant, TxEntry, AuditEntry, RecordType } from '@/lib/types'
-
-function hexToUint8Array(hex: string): Uint8Array {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex
-  const arr = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < arr.length; i++)
-    arr[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return arr
-}
 
 function serialize<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj, (_k, v) =>
@@ -101,12 +93,10 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
 
     const metadata = { ...params, wallet: address, ts: Date.now() }
     let payload: string
-    let iv: string | undefined
 
     if (encKey) {
       const encrypted = await encrypt(JSON.stringify(metadata), encKey)
       payload = JSON.stringify({ enc: encrypted.ciphertext, iv: encrypted.iv })
-      iv = encrypted.iv
     } else {
       payload = JSON.stringify({ plain: JSON.stringify(metadata) })
     }
@@ -123,13 +113,9 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
       payload = JSON.stringify(parsed)
     }
 
-    // Pin to IPFS via Vercel API (falls back to localStorage in dev)
     const ipfsCid = await pinBlob(payload, `${params.type}: ${params.title}`)
-
-    // Derive content hash for on-chain anchoring
     const contentHash = keccak256(toUtf8Bytes(payload)) as Hash
 
-    // Send on-chain tx
     const hash = await instance.write.addRecord([contentHash, ipfsCid, params.type, params.title])
     const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
 
@@ -138,8 +124,8 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
       type: params.type, title: params.title,
       provider: params.provider || 'Unknown',
       date: params.date, notes: params.notes,
-      txHash: hash, blockNumber: receipt.blockNumber,
-      encrypted: !!encKey, iv, accessCount: 0, ts: Date.now(),
+      txHash: hash, blockNumber: receipt.blockNumber.toString(),
+      encrypted: !!encKey, accessCount: 0, ts: Date.now(),
     })
 
     setRecords(prev => {
@@ -170,9 +156,8 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
 
   // ── decryptRecord ─────────────────────────────────────────────────────────
   const decryptRecord = useCallback(async (record: HealthRecord): Promise<string> => {
-    if (!encKey || !record.iv) return record.notes
+    if (!encKey) return record.notes
     try {
-      // Fetch from IPFS (checks localStorage cache first)
       const raw = await fetchBlob(record.ipfsCid)
       if (!raw) return record.notes
       const parsed = JSON.parse(raw)
@@ -195,33 +180,55 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
       ? BigInt(Math.floor(new Date(params.expiry).getTime() / 1000))
       : 0n
 
-    // Encrypt patient AES key for grantee
-    const keyEnvelope = await encryptAesKeyForGrantee(encKey, params.granteeSig)
+    // Encrypt one AES key envelope per record for this grantee
+    const ciphertexts: string[] = []
+    const ivs: string[]         = []
 
-    // Update each record blob with the grantee's key envelope
-    // This re-pins to IPFS so the grantee can fetch it from any browser
-    for (const rid of params.recordIds) {
-      const rec = records.find(r => r.id === rid)
-      if (!rec) continue
-      await updateBlobForGrantee(rec.ipfsCid, params.granteeAddress, keyEnvelope)
+    for (const _rid of params.recordIds) {
+      const envelope = await encryptAesKeyForGrantee(encKey, params.granteeSig)
+      ciphertexts.push(envelope.ciphertext)
+      ivs.push(envelope.iv)
     }
 
-    const hash = await instance.write.grantAccess([params.granteeAddress, params.recordIds, expiresAt])
-    const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+    console.log('Granting access with:', {
+      grantee: params.granteeAddress,
+      recordIds: params.recordIds,
+      expiresAt: expiresAt.toString(),
+      ciphertexts: ciphertexts.map(c => c.slice(0, 20)),
+      ivs,
+    })
+
+    // Single tx — grants access + stores all key envelopes atomically on-chain
+    const hash = await instance.write.grantAccess([
+      params.granteeAddress,
+      params.recordIds,
+      expiresAt,
+      ciphertexts,
+      ivs,
+    ])
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash, confirmations: 1, timeout: 120_000,
+    })
+
+    console.log('Grant tx confirmed:', hash, '| block:', receipt.blockNumber.toString())
 
     // Parse grantId from event
     let grantId = grants.length
     try {
-      const logs = parseEventLogs({ abi: CONTRACT_ABI, logs: receipt.logs, eventName: 'AccessGranted' })
+      const logs = parseEventLogs({
+        abi: CONTRACT_ABI, logs: receipt.logs, eventName: 'AccessGranted',
+      })
       if (logs.length > 0) {
-        const args = logs[0].args as unknown as { grantId: bigint }
-        grantId = Number(args.grantId)
+        const log = logs[0] as unknown as { args: { grantId: bigint } }
+        grantId = Number(log.args.grantId)
       }
     } catch { /* use fallback */ }
 
     setRecords(prev => {
       const next = prev.map(r =>
-        params.recordIds.includes(r.id) ? { ...r, accessCount: r.accessCount + 1 } : r
+        params.recordIds.includes(r.id)
+          ? { ...r, accessCount: r.accessCount + 1 }
+          : r
       )
       store.records.save(address, next)
       return next
@@ -231,8 +238,8 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
       grantId, name: params.name, address: params.granteeAddress,
       role: params.role, purpose: params.purpose,
       recordIds: params.recordIds, titles: params.titles,
-      expiry: params.expiry, expiresAt,
-      txHash: hash, blockNumber: receipt.blockNumber, ts: Date.now(),
+      expiry: params.expiry, expiresAt: expiresAt.toString(),
+      txHash: hash, blockNumber: receipt.blockNumber.toString(), ts: Date.now(),
     })
 
     setGrants(prev => {

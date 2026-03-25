@@ -5,12 +5,8 @@ pragma solidity ^0.8.20;
  * @title MedVaultRegistry
  * @author MedVault
  * @notice Patient-controlled health record registry on Base.
- *         Patients deploy their own instance of this contract.
- *         Records are stored as IPFS CIDs + keccak256 content hashes.
- *         Access is granted/revoked per-grantee, per-record, with optional expiry.
- *
- * Deploy: forge create --rpc-url https://mainnet.base.org --private-key <KEY> contracts/MedVaultRegistry.sol:MedVaultRegistry
- * Verify: forge verify-contract <ADDR> contracts/MedVaultRegistry.sol:MedVaultRegistry --chain 8453 --etherscan-api-key <KEY>
+ *         Key envelopes are stored on-chain per grantee per record.
+ *         No IPFS mutation required on grant — fully decentralized.
  */
 contract MedVaultRegistry {
 
@@ -19,30 +15,34 @@ contract MedVaultRegistry {
     address public owner;
 
     struct Record {
-        bytes32 contentHash;   // keccak256 of the encrypted IPFS payload
-        string  ipfsCid;       // IPFS CID of the encrypted blob
-        string  recordType;    // e.g. "Lab Results"
-        string  title;         // e.g. "Blood Panel Q4-2024"
-        uint256 timestamp;     // block.timestamp at upload
-        bool    active;        // false = soft-deleted
+        bytes32 contentHash;
+        string  ipfsCid;
+        string  recordType;
+        string  title;
+        uint256 timestamp;
+        bool    active;
+    }
+
+    struct KeyEnvelope {
+        string ciphertext;
+        string iv;
+        bool   exists;
     }
 
     struct AccessGrant {
-        address  grantee;
-        bytes32[] recordIds;   // which record hashes are accessible
-        uint256  expiresAt;    // unix timestamp; 0 = no expiry
-        bool     active;
+        address   grantee;
+        bytes32[] recordIds;
+        uint256   expiresAt;
+        bool      active;
     }
 
-    // recordId (== contentHash / bytes32) → Record
-    mapping(bytes32 => Record) public records;
+    mapping(bytes32 => Record)                          public records;
+    bytes32[]                                           public recordIds;
+    mapping(uint256 => AccessGrant)                     public grants;
+    uint256                                             public grantCount;
 
-    // Ordered list of all record IDs (including deleted ones)
-    bytes32[] public recordIds;
-
-    // grantIndex → AccessGrant
-    mapping(uint256 => AccessGrant) public grants;
-    uint256 public grantCount;
+    // grantee → recordId → encrypted AES key envelope
+    mapping(address => mapping(bytes32 => KeyEnvelope)) public keyEnvelopes;
 
     // ─── Events ──────────────────────────────────────────────────────────────
 
@@ -53,20 +53,14 @@ contract MedVaultRegistry {
         string  title,
         uint256 timestamp
     );
-
     event RecordRemoved(bytes32 indexed id);
-
     event AccessGranted(
         uint256 indexed grantId,
         address indexed grantee,
         bytes32[]       recordIds,
         uint256         expiresAt
     );
-
-    event AccessRevoked(
-        uint256 indexed grantId,
-        address indexed grantee
-    );
+    event AccessRevoked(uint256 indexed grantId, address indexed grantee);
 
     // ─── Modifiers ───────────────────────────────────────────────────────────
 
@@ -83,15 +77,8 @@ contract MedVaultRegistry {
 
     // ─── Record Management ───────────────────────────────────────────────────
 
-    /**
-     * @notice Anchor an encrypted health record on-chain.
-     * @param id          keccak256 hash of the encrypted IPFS payload (acts as record ID)
-     * @param cid         IPFS CID of the encrypted blob
-     * @param rType       Record type string (e.g. "Lab Results")
-     * @param title       Human-readable title
-     */
     function addRecord(
-        bytes32       id,
+        bytes32         id,
         string calldata cid,
         string calldata rType,
         string calldata title
@@ -109,12 +96,8 @@ contract MedVaultRegistry {
         emit RecordAdded(id, cid, rType, title, block.timestamp);
     }
 
-    /**
-     * @notice Soft-delete a record (marks inactive, does not erase history).
-     * @param id  Record ID to remove
-     */
     function removeRecord(bytes32 id) external onlyOwner {
-        require(records[id].active, "MedVault: record not found or already removed");
+        require(records[id].active, "MedVault: record not found");
         records[id].active = false;
         emit RecordRemoved(id);
     }
@@ -122,19 +105,32 @@ contract MedVaultRegistry {
     // ─── Access Control ──────────────────────────────────────────────────────
 
     /**
-     * @notice Grant a wallet address access to a specific set of records.
-     * @param grantee    Address receiving access
-     * @param rIds       Array of record IDs (bytes32) to share
-     * @param expiresAt  Unix timestamp after which the grant is invalid; 0 = permanent
-     * @return grantId   Index of the created grant
+     * @notice Grant access and store encrypted AES key envelopes on-chain.
+     * @param grantee      Wallet receiving access
+     * @param rIds         Record IDs to share
+     * @param expiresAt    Unix expiry timestamp; 0 = permanent
+     * @param ciphertexts  AES key ciphertext per record (same order as rIds)
+     * @param ivs          AES key IV per record (same order as rIds)
      */
     function grantAccess(
-        address          grantee,
+        address            grantee,
         bytes32[] calldata rIds,
-        uint256          expiresAt
+        uint256            expiresAt,
+        string[]  calldata ciphertexts,
+        string[]  calldata ivs
     ) external onlyOwner returns (uint256 grantId) {
-        require(grantee != address(0), "MedVault: zero address");
-        require(rIds.length > 0,       "MedVault: no records specified");
+        require(grantee != address(0),             "MedVault: zero address");
+        require(rIds.length > 0,                   "MedVault: no records");
+        require(rIds.length == ciphertexts.length, "MedVault: length mismatch");
+        require(rIds.length == ivs.length,         "MedVault: length mismatch");
+
+        for (uint256 i = 0; i < rIds.length; i++) {
+            keyEnvelopes[grantee][rIds[i]] = KeyEnvelope({
+                ciphertext: ciphertexts[i],
+                iv:         ivs[i],
+                exists:     true
+            });
+        }
 
         grantId = grantCount++;
         grants[grantId] = AccessGrant({
@@ -147,30 +143,28 @@ contract MedVaultRegistry {
     }
 
     /**
-     * @notice Revoke an existing access grant.
-     * @param grantId  Index of the grant to revoke
+     * @notice Revoke access and delete all key envelopes for this grant.
      */
     function revokeAccess(uint256 grantId) external onlyOwner {
         require(grants[grantId].active, "MedVault: grant not active");
-        address grantee = grants[grantId].grantee;
-        grants[grantId].active = false;
+        AccessGrant storage g = grants[grantId];
+        for (uint256 i = 0; i < g.recordIds.length; i++) {
+            delete keyEnvelopes[g.grantee][g.recordIds[i]];
+        }
+        address grantee = g.grantee;
+        g.active = false;
         emit AccessRevoked(grantId, grantee);
     }
 
     // ─── View Helpers ────────────────────────────────────────────────────────
 
-    /**
-     * @notice Check whether a grantee currently has access to a specific record.
-     * @param grantee   Address to check
-     * @param recordId  Record ID (bytes32 content hash)
-     */
     function canAccess(address grantee, bytes32 recordId)
         external view returns (bool)
     {
         for (uint256 i = 0; i < grantCount; i++) {
             AccessGrant storage g = grants[i];
-            if (!g.active)              continue;
-            if (g.grantee != grantee)   continue;
+            if (!g.active)            continue;
+            if (g.grantee != grantee) continue;
             if (g.expiresAt > 0 && block.timestamp > g.expiresAt) continue;
             for (uint256 j = 0; j < g.recordIds.length; j++) {
                 if (g.recordIds[j] == recordId) return true;
@@ -180,13 +174,18 @@ contract MedVaultRegistry {
     }
 
     /**
-     * @notice Return all record IDs that a grantee currently has access to.
-     * @param grantee  Address to query
+     * @notice Get the encrypted AES key envelope for a grantee + record.
      */
+    function getKeyEnvelope(address grantee, bytes32 recordId)
+        external view returns (string memory ciphertext, string memory iv, bool exists)
+    {
+        KeyEnvelope storage e = keyEnvelopes[grantee][recordId];
+        return (e.ciphertext, e.iv, e.exists);
+    }
+
     function accessibleRecords(address grantee)
         external view returns (bytes32[] memory)
     {
-        // First pass: count
         uint256 count = 0;
         for (uint256 i = 0; i < grantCount; i++) {
             AccessGrant storage g = grants[i];
@@ -195,7 +194,6 @@ contract MedVaultRegistry {
             if (g.expiresAt > 0 && block.timestamp > g.expiresAt) continue;
             count += g.recordIds.length;
         }
-        // Second pass: fill
         bytes32[] memory result = new bytes32[](count);
         uint256 idx = 0;
         for (uint256 i = 0; i < grantCount; i++) {
@@ -210,21 +208,14 @@ contract MedVaultRegistry {
         return result;
     }
 
-    /// @notice Total number of records ever added (including removed).
     function getRecordCount() external view returns (uint256) {
         return recordIds.length;
     }
 
-    /// @notice Total number of grants ever created (including revoked).
     function getGrantCount() external view returns (uint256) {
         return grantCount;
     }
 
-    /**
-     * @notice Paginated record ID list (for front-end queries).
-     * @param offset  Start index
-     * @param limit   Max records to return
-     */
     function getRecordIds(uint256 offset, uint256 limit)
         external view returns (bytes32[] memory)
     {
@@ -237,10 +228,6 @@ contract MedVaultRegistry {
         return page;
     }
 
-    /**
-     * @notice Return a grant's record ID array (mapping doesn't expose dynamic arrays).
-     * @param grantId  Grant index
-     */
     function getGrantRecordIds(uint256 grantId)
         external view returns (bytes32[] memory)
     {

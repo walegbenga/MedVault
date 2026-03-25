@@ -1,14 +1,13 @@
 import React, { useState } from 'react'
-import { useAccount, usePublicClient } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { getContract, type Address, createPublicClient, http } from 'viem'
-import { baseSepolia, base } from 'wagmi/chains'
 import { Button } from '@/components/ui/Button'
 import { Field, Input } from '@/components/ui/Field'
 import { useToast } from '@/components/ui/Toast'
 import { useGranteeKey } from '@/hooks/useEncryptionKey'
 import { CONTRACT_ABI } from '@/lib/contract'
 import { decryptAesKeyFromEnvelope, decrypt } from '@/lib/crypto'
-import { fetchBlobForGrantee } from '@/lib/ipfs'
+import { fetchBlob } from '@/lib/ipfs'
 import { targetChain } from '@/lib/wagmi'
 import { env } from '@/env'
 
@@ -31,7 +30,6 @@ interface SharedRecord {
 
 export function GranteeView() {
   const { address } = useAccount()
-  const publicClient = usePublicClient()
   const { toast } = useToast()
   const { granteeSig, loading: sigLoading, deriveGranteeKey } = useGranteeKey()
 
@@ -54,8 +52,6 @@ export function GranteeView() {
 
     setChecking(true)
     try {
-      // Always create a fresh public client with a reliable RPC
-      // This avoids issues with the wagmi public client using an unreliable RPC
       const reliableClient = createPublicClient({
         chain: targetChain,
         transport: http(rpcUrl, {
@@ -65,102 +61,113 @@ export function GranteeView() {
         }),
       })
 
-      // Verify chain
-      const chainId = await reliableClient.getChainId()
-      console.log('Chain ID:', chainId, '| Expected:', targetChain.id)
-
-      // Read contract
       const contract = getContract({
         address: patientContract as Address,
         abi: CONTRACT_ABI,
         client: reliableClient,
       })
 
-      const recordCount = await contract.read.getRecordCount() as bigint
-      console.log('Record count:', Number(recordCount))
+      // Single call — returns only record IDs this grantee can access
+      const accessibleIds = await contract.read.accessibleRecords([address]) as `0x${string}`[]
+      console.log('Accessible record IDs:', accessibleIds.length, accessibleIds)
 
-      const accessible: SharedRecord[] = []
-
-      for (let i = 0; i < Number(recordCount); i++) {
-        const rid = await contract.read.recordIds([i]) as `0x${string}`
-        console.log(`Record ${i}:`, rid)
-
-        const hasAccess = await contract.read.canAccess([address, rid]) as boolean
-        console.log(`  canAccess:`, hasAccess)
-        if (!hasAccess) continue
-
-        const recRaw = await contract.read.records([rid])
-        console.log('  recRaw:', recRaw)
-
-        let ipfsCid = ''
-        let recordType = ''
-        let title = ''
-        let active = false
-
-        if (Array.isArray(recRaw)) {
-          ipfsCid    = recRaw[1] as string
-          recordType = recRaw[2] as string
-          title      = recRaw[3] as string
-          active     = recRaw[5] as boolean
-        } else {
-          const r = recRaw as Record<string, unknown>
-          ipfsCid    = r.ipfsCid    as string
-          recordType = r.recordType as string
-          title      = r.title      as string
-          active     = r.active     as boolean
-        }
-
-        console.log(`  ipfsCid: ${ipfsCid} | active: ${active}`)
-        if (!active) continue
-
-        let notes = ''
-        let decrypted = false
-
-        try {
-          const blobRaw = await fetchBlobForGrantee(ipfsCid)
-          console.log(`  Blob found: ${!!blobRaw}`)
-
-          if (blobRaw) {
-            const blob = JSON.parse(blobRaw)
-            console.log('  SharedKeys:', Object.keys(blob.sharedKeys ?? {}))
-
-            const envelope =
-              blob.sharedKeys?.[address.toLowerCase()] ??
-              blob.sharedKeys?.[address]
-
-            console.log(`  Envelope found: ${!!envelope}`)
-
-            if (envelope) {
-              const aesKey = await decryptAesKeyFromEnvelope(envelope, granteeSig)
-              const plain  = await decrypt({ ciphertext: blob.enc, iv: blob.iv }, aesKey)
-              const meta   = JSON.parse(plain)
-              notes     = meta.notes ?? ''
-              decrypted = true
-              console.log('  Decrypted successfully')
-            }
-          }
-        } catch (decryptErr) {
-          console.warn('  Decryption failed:', decryptErr)
-        }
-
-        accessible.push({ id: rid, ipfsCid, type: recordType, title, notes, decrypted })
+      if (accessibleIds.length === 0) {
+        setRecords([])
+        setStep('view')
+        toast('warn', `No records accessible to ${address.slice(0,6)}…${address.slice(-4)}`)
+        return
       }
 
-      console.log('Total accessible:', accessible.length)
+      // Fetch record metadata + key envelope in parallel
+      const settled = await Promise.allSettled(
+        accessibleIds.map(async (rid) => {
+          const [recRaw, envelopeRaw] = await Promise.all([
+            contract.read.records([rid]),
+            contract.read.getKeyEnvelope([address, rid]),
+          ])
+
+          console.log('Record raw:', rid, recRaw)
+          console.log('Envelope raw:', rid, envelopeRaw)
+
+          // Parse record fields
+          let ipfsCid    = ''
+          let recordType = ''
+          let title      = ''
+          let active     = false
+
+          if (Array.isArray(recRaw)) {
+            ipfsCid    = recRaw[1] as string
+            recordType = recRaw[2] as string
+            title      = recRaw[3] as string
+            active     = recRaw[5] as boolean
+          } else {
+            const r = recRaw as Record<string, unknown>
+            ipfsCid    = r.ipfsCid    as string
+            recordType = r.recordType as string
+            title      = r.title      as string
+            active     = r.active     as boolean
+          }
+
+          console.log('Parsed record:', { ipfsCid, recordType, title, active })
+
+          if (!active) return null
+
+          // Parse envelope — [ciphertext, iv, exists]
+          const [ciphertext, iv, exists] = envelopeRaw as [string, string, boolean]
+          console.log('Envelope:', { exists, ciphertext: ciphertext?.slice(0, 20), iv })
+
+          let notes     = ''
+          let decrypted = false
+
+          if (exists && ciphertext && iv) {
+            try {
+              const aesKey  = await decryptAesKeyFromEnvelope({ ciphertext, iv }, granteeSig)
+              const blobRaw = await fetchBlob(ipfsCid)
+              console.log('Blob fetched:', !!blobRaw)
+
+              if (blobRaw) {
+                const blob = JSON.parse(blobRaw)
+                console.log('Blob keys:', Object.keys(blob))
+                if (blob.enc && blob.iv) {
+                  const plain = await decrypt({ ciphertext: blob.enc, iv: blob.iv }, aesKey)
+                  const meta  = JSON.parse(plain)
+                  notes     = meta.notes ?? ''
+                  decrypted = true
+                  console.log('Decrypted successfully')
+                }
+              }
+            } catch (e) {
+              console.warn('Decryption failed for', rid, e)
+            }
+          }
+
+          return { id: rid, ipfsCid, type: recordType, title, notes, decrypted } as SharedRecord
+        })
+      )
+
+      // Filter out nulls and rejections
+      const accessible = settled
+        .map(r => r.status === 'fulfilled' ? r.value : null)
+        .filter((r): r is SharedRecord => r !== null)
+
+      // Preserve on-chain order
+      accessible.sort((a, b) =>
+        accessibleIds.indexOf(a.id as `0x${string}`) -
+        accessibleIds.indexOf(b.id as `0x${string}`)
+      )
+
       setRecords(accessible)
       setStep('view')
 
       if (accessible.length === 0) {
-        toast('warn', `Found ${Number(recordCount)} record(s) but none are accessible to your wallet ${address.slice(0,6)}…${address.slice(-4)}`)
+        toast('warn', 'Records found but none are active.')
       } else {
         toast('ok', `Found ${accessible.length} accessible record${accessible.length !== 1 ? 's' : ''}.`)
       }
+
     } catch (e: unknown) {
       console.error('handleCheck error:', e)
       const msg = e instanceof Error ? e.message : 'Failed to check access'
-      console.error('Full error message:', msg)
-      console.error('Contract address:', patientContract)
-      console.error('RPC URL:', rpcUrl)
       toast('err', msg.length > 120 ? msg.slice(0, 120) + '…' : msg)
     } finally {
       setChecking(false)
@@ -189,7 +196,6 @@ export function GranteeView() {
   return (
     <div style={{ maxWidth: 800, margin: '0 auto', padding: '2rem 1rem' }}>
 
-      {/* Header */}
       <div style={{ marginBottom: '2rem' }}>
         <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.5rem', fontWeight: 800, marginBottom: '0.4rem' }}>
           🔑 Grantee View
@@ -340,7 +346,7 @@ export function GranteeView() {
                 No accessible records
               </div>
               <div style={{ fontSize: '0.82rem' }}>
-                The patient hasn't granted your wallet access, or has revoked it.
+                The patient hasn't granted your wallet access, or access has been revoked.
               </div>
             </div>
           ) : (
@@ -391,8 +397,7 @@ export function GranteeView() {
                       border: '1px solid rgba(255,179,0,0.2)',
                       borderRadius: 7, marginBottom: '0.75rem',
                     }}>
-                      ⚠ Ask the patient to re-grant access using the latest MedVault so
-                      the decryption key is shared with you.
+                      ⚠ No decryption key found. Ask the patient to grant access again.
                     </div>
                   )}
 
