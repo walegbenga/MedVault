@@ -3,16 +3,16 @@ import { useSignMessage, useAccount } from 'wagmi'
 import { deriveKeyFromSignature, isSecureContext } from '@/lib/crypto'
 
 const ENC_MSG = (addr: string) =>
-  `MedVault encryption key v1\nWallet: ${addr.toLowerCase()}\n\nSign to unlock your encrypted health records.\nNo gas is spent.`
+  `VeriHealth encryption key v1\nWallet: ${addr.toLowerCase()}\n\nSign to unlock your encrypted health records.\nNo gas is spent.`
 
 const GRANTEE_MSG = (addr: string) =>
-  `MedVault grantee key v1\nWallet: ${addr.toLowerCase()}\n\nSign to access records shared with you.\nNo gas is spent.`
+  `VeriHealth grantee key v1\nWallet: ${addr.toLowerCase()}\n\nSign to access records shared with you.\nNo gas is spent.`
 
 export function useEncryptionKey() {
   const { address } = useAccount()
-  const [encKey, setEncKey] = useState<CryptoKey | null>(null)
-  const [encSig, setEncSig] = useState<string | null>(null)
-  const [error, setError]   = useState<string | null>(null)
+  const [encKey,  setEncKey]  = useState<CryptoKey | null>(null)
+  const [encSig,  setEncSig]  = useState<string | null>(null)
+  const [error,   setError]   = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   const { signMessageAsync } = useSignMessage()
@@ -46,8 +46,8 @@ export function useEncryptionKey() {
 export function useGranteeKey() {
   const { address } = useAccount()
   const [granteeSig, setGranteeSig] = useState<string | null>(null)
-  const [error, setError]           = useState<string | null>(null)
-  const [loading, setLoading]       = useState(false)
+  const [error,      setError]      = useState<string | null>(null)
+  const [loading,    setLoading]    = useState(false)
 
   const { signMessageAsync } = useSignMessage()
 

@@ -5,12 +5,13 @@ import { Button } from '@/components/ui/Button'
 import { Field, Input } from '@/components/ui/Field'
 import { useToast } from '@/components/ui/Toast'
 import { useGranteeKey } from '@/hooks/useEncryptionKey'
+import { useEnsResolver, useEnsName } from '@/hooks/useEns'
+import { useIsMobile } from '@/hooks/useIsMobile'
 import { CONTRACT_ABI } from '@/lib/contract'
 import { decryptAesKeyFromEnvelope, decrypt } from '@/lib/crypto'
 import { fetchBlob } from '@/lib/ipfs'
 import { targetChain } from '@/lib/wagmi'
 import { env } from '@/env'
-import { useIsMobile } from '@/hooks/useIsMobile'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
 
@@ -27,19 +28,37 @@ interface SharedRecord {
   title: string
   notes: string
   decrypted: boolean
+  expiresAt: number
+}
+
+function getExpiryStatus(expiresAt: number): {
+  label: string; color: string; urgent: boolean
+} | null {
+  if (!expiresAt || expiresAt === 0) return null
+  const now      = Date.now()
+  const expiresMs = expiresAt * 1000
+  const diffMs   = expiresMs - now
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
+  if (diffMs <= 0)      return { label: 'Expired',                    color: 'var(--red)',   urgent: true  }
+  if (diffDays <= 1)    return { label: 'Expires today',              color: 'var(--red)',   urgent: true  }
+  if (diffDays <= 3)    return { label: `Expires in ${diffDays} days`, color: 'var(--amber)', urgent: true  }
+  if (diffDays <= 7)    return { label: `Expires in ${diffDays} days`, color: 'var(--amber)', urgent: false }
+  if (diffDays <= 30)   return { label: `Expires in ${diffDays} days`, color: 'var(--text3)', urgent: false }
+  return { label: `Expires ${new Date(expiresMs).toLocaleDateString()}`, color: 'var(--text3)', urgent: false }
 }
 
 export function GranteeView() {
-  const { address } = useAccount()
-  const { toast } = useToast()
+  const { address }  = useAccount()
+  const { toast }    = useToast()
+  const isMobile     = useIsMobile()
   const { granteeSig, loading: sigLoading, deriveGranteeKey } = useGranteeKey()
+  const ens          = useEnsResolver()
+  const walletEnsName = useEnsName(address)
 
   const [patientContract, setPatientContract] = useState('')
   const [checking, setChecking] = useState(false)
-  const [records, setRecords]   = useState<SharedRecord[]>([])
-  const [step, setStep]         = useState<'sign' | 'enter' | 'view'>('sign')
-
-  const isMobile = useIsMobile()
+  const [records,  setRecords]  = useState<SharedRecord[]>([])
+  const [step,     setStep]     = useState<'sign' | 'enter' | 'view'>('sign')
 
   const handleSign = async () => {
     const sig = await deriveGranteeKey()
@@ -48,31 +67,30 @@ export function GranteeView() {
 
   const handleCheck = async () => {
     if (!address || !granteeSig) return
-    if (!/^0x[0-9a-fA-F]{40}$/.test(patientContract)) {
-      toast('warn', 'Enter a valid contract address (0x…)')
-      return
+
+    let contractAddr = patientContract.trim()
+    if (!(/^0x[0-9a-fA-F]{40}$/.test(contractAddr))) {
+      const resolved = await ens.resolve(contractAddr)
+      if (!resolved) { toast('warn', 'Enter a valid contract address or ENS name.'); return }
+      contractAddr = resolved
+      setPatientContract(resolved)
     }
 
     setChecking(true)
     try {
       const reliableClient = createPublicClient({
         chain: targetChain,
-        transport: http(rpcUrl, {
-          batch: true,
-          retryCount: 5,
-          retryDelay: 1000,
-        }),
+        transport: http(rpcUrl, { batch: true, retryCount: 5, retryDelay: 1000 }),
       })
 
       const contract = getContract({
-        address: patientContract as Address,
+        address: contractAddr as Address,
         abi: CONTRACT_ABI,
         client: reliableClient,
       })
 
-      // Single call — returns only record IDs this grantee can access
+      // Single call — returns only accessible record IDs
       const accessibleIds = await contract.read.accessibleRecords([address]) as `0x${string}`[]
-      console.log('Accessible record IDs:', accessibleIds.length, accessibleIds)
 
       if (accessibleIds.length === 0) {
         setRecords([])
@@ -81,7 +99,25 @@ export function GranteeView() {
         return
       }
 
-      // Fetch record metadata + key envelope in parallel
+      // Build expiry map from grants
+      const expiryMap: Record<string, number> = {}
+      try {
+        const grantCount = await contract.read.getGrantCount() as bigint
+        for (let i = 0; i < Number(grantCount); i++) {
+          const grantRaw  = await contract.read.grants([BigInt(i)]) as unknown[]
+          const grantee   = grantRaw[0] as string
+          const expiresAt = Number(grantRaw[1] as bigint)
+          const active    = grantRaw[2] as boolean
+          if (!active) continue
+          if (grantee.toLowerCase() !== address.toLowerCase()) continue
+          const grantRecordIds = await contract.read.getGrantRecordIds([BigInt(i)]) as `0x${string}`[]
+          for (const rid of grantRecordIds) {
+            expiryMap[rid.toLowerCase()] = expiresAt
+          }
+        }
+      } catch { /* expiry map best-effort */ }
+
+      // Fetch records + envelopes in parallel
       const settled = await Promise.allSettled(
         accessibleIds.map(async (rid) => {
           const [recRaw, envelopeRaw] = await Promise.all([
@@ -89,10 +125,6 @@ export function GranteeView() {
             contract.read.getKeyEnvelope([address, rid]),
           ])
 
-          console.log('Record raw:', rid, recRaw)
-          console.log('Envelope raw:', rid, envelopeRaw)
-
-          // Parse record fields
           let ipfsCid    = ''
           let recordType = ''
           let title      = ''
@@ -111,13 +143,9 @@ export function GranteeView() {
             active     = r.active     as boolean
           }
 
-          console.log('Parsed record:', { ipfsCid, recordType, title, active })
-
           if (!active) return null
 
-          // Parse envelope — [ciphertext, iv, exists]
           const [ciphertext, iv, exists] = envelopeRaw as [string, string, boolean]
-          console.log('Envelope:', { exists, ciphertext: ciphertext?.slice(0, 20), iv })
 
           let notes     = ''
           let decrypted = false
@@ -126,17 +154,13 @@ export function GranteeView() {
             try {
               const aesKey  = await decryptAesKeyFromEnvelope({ ciphertext, iv }, granteeSig)
               const blobRaw = await fetchBlob(ipfsCid)
-              console.log('Blob fetched:', !!blobRaw)
-
               if (blobRaw) {
                 const blob = JSON.parse(blobRaw)
-                console.log('Blob keys:', Object.keys(blob))
                 if (blob.enc && blob.iv) {
                   const plain = await decrypt({ ciphertext: blob.enc, iv: blob.iv }, aesKey)
                   const meta  = JSON.parse(plain)
                   notes     = meta.notes ?? ''
                   decrypted = true
-                  console.log('Decrypted successfully')
                 }
               }
             } catch (e) {
@@ -144,16 +168,18 @@ export function GranteeView() {
             }
           }
 
-          return { id: rid, ipfsCid, type: recordType, title, notes, decrypted } as SharedRecord
+          return {
+            id: rid, ipfsCid, type: recordType, title,
+            notes, decrypted,
+            expiresAt: expiryMap[rid.toLowerCase()] ?? 0,
+          } as SharedRecord
         })
       )
 
-      // Filter out nulls and rejections
       const accessible = settled
         .map(r => r.status === 'fulfilled' ? r.value : null)
         .filter((r): r is SharedRecord => r !== null)
 
-      // Preserve on-chain order
       accessible.sort((a, b) =>
         accessibleIds.indexOf(a.id as `0x${string}`) -
         accessibleIds.indexOf(b.id as `0x${string}`)
@@ -180,25 +206,15 @@ export function GranteeView() {
   const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`
 
   const S = {
-    card: {
-      background: 'var(--s1)', border: '1px solid var(--border2)',
-      borderRadius: 14, padding: '1.75rem',
-    } as React.CSSProperties,
-    infoTeal: {
-      fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8,
-      marginBottom: '1.25rem', background: 'rgba(0,229,204,0.05)',
-      border: '1px solid rgba(0,229,204,0.18)', color: 'var(--text2)',
-    } as React.CSSProperties,
-    infoAmber: {
-      fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8,
-      marginBottom: '1.25rem', background: 'rgba(255,179,0,0.05)',
-      border: '1px solid rgba(255,179,0,0.22)', color: '#ffd080',
-    } as React.CSSProperties,
+    card: { background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 14, padding: '1.75rem' } as React.CSSProperties,
+    infoTeal: { fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(0,229,204,0.05)', border: '1px solid rgba(0,229,204,0.18)', color: 'var(--text2)' } as React.CSSProperties,
+    infoAmber: { fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(255,179,0,0.05)', border: '1px solid rgba(255,179,0,0.22)', color: '#ffd080' } as React.CSSProperties,
   }
 
   return (
     <div style={{ maxWidth: 800, margin: '0 auto', padding: '2rem 1rem' }}>
 
+      {/* Header */}
       <div style={{ marginBottom: '2rem' }}>
         <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.5rem', fontWeight: 800, marginBottom: '0.4rem' }}>
           🔑 Grantee View
@@ -206,7 +222,7 @@ export function GranteeView() {
         <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65 }}>
           Access health records shared with your wallet{' '}
           <span style={{ fontFamily: 'var(--mono)', color: 'var(--teal)' }}>
-            {address ? short(address) : ''}
+            {walletEnsName ?? (address ? short(address) : '')}
           </span>
           {' '}on <strong>{targetChain.name}</strong>.
         </p>
@@ -235,10 +251,10 @@ export function GranteeView() {
                   {isDone ? '✓' : s.n}
                 </div>
                 {!isMobile && (
-  <span style={{ fontSize: '0.8rem', color: isActive ? 'var(--text)' : 'var(--text3)' }}>
-    {s.label}
-  </span>
-)}
+                  <span style={{ fontSize: '0.8rem', color: isActive ? 'var(--text)' : 'var(--text3)' }}>
+                    {s.label}
+                  </span>
+                )}
               </div>
               {i < 2 && <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />}
             </React.Fragment>
@@ -248,10 +264,7 @@ export function GranteeView() {
 
       {/* Signature display */}
       {granteeSig && step !== 'sign' && (
-        <div style={{
-          background: 'var(--s1)', border: '1px solid var(--border2)',
-          borderRadius: 12, padding: '1.25rem', marginBottom: '1.5rem',
-        }}>
+        <div style={{ background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 12, padding: '1.25rem', marginBottom: '1.5rem' }}>
           <div style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.4rem', color: 'var(--amber)' }}>
             📋 Share this signature with the patient
           </div>
@@ -260,30 +273,21 @@ export function GranteeView() {
           </p>
           <div
             onClick={() => navigator.clipboard.writeText(granteeSig).then(() => toast('ok', 'Copied!'))}
-            style={{
-              fontFamily: 'var(--mono)', fontSize: '0.65rem', color: 'var(--teal)',
-              background: 'var(--s2)', padding: '0.65rem 0.875rem', borderRadius: 7,
-              wordBreak: 'break-all', cursor: 'pointer', border: '1px solid var(--border)',
-            }}
+            style={{ fontFamily: 'var(--mono)', fontSize: '0.65rem', color: 'var(--teal)', background: 'var(--s2)', padding: '0.65rem 0.875rem', borderRadius: 7, wordBreak: 'break-all', cursor: 'pointer', border: '1px solid var(--border)' }}
             title="Click to copy"
           >
             {granteeSig}
           </div>
-          <div style={{ fontSize: '0.72rem', color: 'var(--text3)', marginTop: '0.4rem' }}>
-            Click to copy
-          </div>
+          <div style={{ fontSize: '0.72rem', color: 'var(--text3)', marginTop: '0.4rem' }}>Click to copy</div>
         </div>
       )}
 
       {/* Step 1 */}
       {step === 'sign' && (
         <div style={S.card}>
-          <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>
-            Step 1: Sign to derive your decryption key
-          </h3>
+          <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Step 1: Sign to derive your decryption key</h3>
           <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65, marginBottom: '1.25rem' }}>
-            Sign a message with your wallet to derive a decryption key unique to your address.
-            This is free — no transaction is sent.
+            Sign a message with your wallet to derive a decryption key unique to your address. This is free — no transaction is sent.
           </p>
           <div style={S.infoTeal}>🔐 Free off-chain signature. No gas spent.</div>
           <Button onClick={handleSign} loading={sigLoading}>✍️ Sign to Unlock</Button>
@@ -293,27 +297,44 @@ export function GranteeView() {
       {/* Step 2 */}
       {step === 'enter' && (
         <div style={S.card}>
-          <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>
-            Step 2: Enter the patient's contract address
-          </h3>
+          <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Step 2: Enter the patient's contract address</h3>
           <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65, marginBottom: '1.25rem' }}>
-            Ask the patient to click <strong>"📋 Copy for Grantee"</strong> in their dashboard
-            and send you the address. Paste it below.
+            Ask the patient to click <strong>"📋 Copy for Grantee"</strong> in their dashboard and send you the address. Paste it below.
           </p>
           <div style={S.infoAmber}>
             ⚠ Make sure you are connected to <strong>{targetChain.name}</strong> before checking.
           </div>
-          <Field label="Patient's Registry Contract Address" required>
-            <Input
-              value={patientContract}
-              onChange={e => setPatientContract(e.target.value.trim())}
-              placeholder="0x…"
-              style={{ fontFamily: 'var(--mono)', fontSize: '0.82rem' }}
-            />
+          <Field label="Patient's Registry Contract Address or ENS" required>
+            <div style={{ position: 'relative' }}>
+              <Input
+                value={patientContract}
+                onChange={e => { setPatientContract(e.target.value.trim()); ens.reset() }}
+                onBlur={async () => {
+                  const val = patientContract.trim()
+                  if (!val || /^0x[0-9a-fA-F]{40}$/.test(val)) return
+                  const resolved = await ens.resolve(val)
+                  if (resolved) setPatientContract(resolved)
+                }}
+                placeholder="0x… or patient.eth"
+                style={{ fontFamily: 'var(--mono)', fontSize: '0.82rem', paddingRight: '3rem' }}
+              />
+              <div style={{ position: 'absolute', right: '0.75rem', top: '50%', transform: 'translateY(-50%)', fontSize: '0.72rem' }}>
+                {ens.resolving && <span style={{ width: 10, height: 10, borderRadius: '50%', border: '2px solid var(--teal)', borderTopColor: 'transparent', display: 'inline-block', animation: 'spin 0.7s linear infinite' }} />}
+                {ens.ensName && !ens.resolving && <span style={{ color: 'var(--green)' }}>✓</span>}
+              </div>
+            </div>
+            {ens.ensName && ens.resolved && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--text2)', marginTop: '0.35rem', fontFamily: 'var(--mono)', padding: '0.3rem 0.6rem', background: 'rgba(0,230,118,0.06)', border: '1px solid rgba(0,230,118,0.2)', borderRadius: 6 }}>
+                ✅ {ens.ensName} → {ens.resolved}
+              </div>
+            )}
+            {ens.error && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--red)', marginTop: '0.35rem', padding: '0.3rem 0.6rem', background: 'rgba(255,68,68,0.06)', border: '1px solid rgba(255,68,68,0.2)', borderRadius: 6 }}>
+                ✗ {ens.error}
+              </div>
+            )}
           </Field>
-          <Button onClick={handleCheck} loading={checking}>
-            🔍 Check My Access
-          </Button>
+          <Button onClick={handleCheck} loading={checking}>🔍 Check My Access</Button>
         </div>
       )}
 
@@ -322,99 +343,76 @@ export function GranteeView() {
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
             <h3 style={{ fontWeight: 700 }}>Accessible Records ({records.length})</h3>
-            <Button variant="outline" size="sm" onClick={() => { setStep('enter'); setRecords([]) }}>
-              ← Try Another
-            </Button>
+            <Button variant="outline" size="sm" onClick={() => { setStep('enter'); setRecords([]) }}>← Try Another</Button>
           </div>
 
-          <div style={{
-            fontSize: '0.8rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem',
-            background: 'rgba(0,82,255,0.06)', border: '1px solid rgba(0,82,255,0.2)', color: '#8ab4ff',
-          }}>
+          <div style={{ fontSize: '0.8rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(0,82,255,0.06)', border: '1px solid rgba(0,82,255,0.2)', color: '#8ab4ff' }}>
             📋 Contract:{' '}
-            
-              <a href={`${EXPLORER}/address/${patientContract}`}
-              target="_blank" rel="noreferrer"
-              style={{ fontFamily: 'var(--mono)', color: 'var(--teal)', fontSize: '0.75rem' }}
-            >
+            <a href={`${EXPLORER}/address/${patientContract}`} target="_blank" rel="noreferrer" style={{ fontFamily: 'var(--mono)', color: 'var(--teal)', fontSize: '0.75rem' }}>
               {patientContract}
             </a>
           </div>
 
+          {/* Expiry summary banner */}
+          {records.some(r => getExpiryStatus(r.expiresAt)?.urgent) && (
+            <div style={{ fontSize: '0.82rem', padding: '0.75rem 1rem', borderRadius: 8, marginBottom: '1rem', background: 'rgba(255,68,68,0.06)', border: '1px solid rgba(255,68,68,0.2)', color: '#ff9999', display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+              <span style={{ fontSize: '1.1rem', flexShrink: 0 }}>🚨</span>
+              <span>Some of your access grants are expiring soon or have already expired. Contact the patient to renew your access.</span>
+            </div>
+          )}
+
           {records.length === 0 ? (
-            <div style={{
-              textAlign: 'center', padding: '3rem',
-              border: '1px dashed var(--border)', borderRadius: 12, color: 'var(--text3)',
-            }}>
+            <div style={{ textAlign: 'center', padding: '3rem', border: '1px dashed var(--border)', borderRadius: 12, color: 'var(--text3)' }}>
               <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>🔒</div>
-              <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text2)', marginBottom: '0.4rem' }}>
-                No accessible records
-              </div>
-              <div style={{ fontSize: '0.82rem' }}>
-                The patient hasn't granted your wallet access, or access has been revoked.
-              </div>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text2)', marginBottom: '0.4rem' }}>No accessible records</div>
+              <div style={{ fontSize: '0.82rem' }}>The patient hasn't granted your wallet access, or access has been revoked.</div>
             </div>
           ) : (
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))',
-              gap: '0.9rem',
-            }}>
-              {records.map((r, i) => (
-                <div key={r.id} style={{
-                  background: 'var(--s1)', border: '1px solid var(--border)',
-                  borderRadius: 12, padding: '1.1rem',
-                  animation: `fadeUp 0.22s ease ${i * 0.05}s both`,
-                }}>
-                  <div style={{
-                    display: 'flex', justifyContent: 'space-between',
-                    alignItems: 'flex-start', marginBottom: '0.65rem',
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: '0.9rem' }}>
+              {records.map((r, i) => {
+                const expiry = getExpiryStatus(r.expiresAt)
+                return (
+                  <div key={r.id} style={{
+                    background: 'var(--s1)',
+                    border: `1px solid ${expiry?.urgent ? 'rgba(255,68,68,0.3)' : 'var(--border)'}`,
+                    borderRadius: 12, padding: '1.1rem',
+                    animation: `fadeUp 0.22s ease ${i * 0.05}s both`,
                   }}>
-                    <span style={{
-                      fontSize: '0.67rem', fontWeight: 700, padding: '0.18rem 0.6rem',
-                      borderRadius: 5, textTransform: 'uppercase', letterSpacing: '0.05em',
-                      background: 'rgba(0,229,204,0.1)', color: 'var(--teal)',
-                      border: '1px solid rgba(0,229,204,0.2)',
-                    }}>
-                      {r.type}
-                    </span>
-                    <span style={{ fontSize: '0.68rem', color: r.decrypted ? 'var(--green)' : 'var(--amber)' }}>
-                      {r.decrypted ? '🔓 Decrypted' : '🔒 Metadata only'}
-                    </span>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.65rem' }}>
+                      <span style={{ fontSize: '0.67rem', fontWeight: 700, padding: '0.18rem 0.6rem', borderRadius: 5, textTransform: 'uppercase', letterSpacing: '0.05em', background: 'rgba(0,229,204,0.1)', color: 'var(--teal)', border: '1px solid rgba(0,229,204,0.2)' }}>
+                        {r.type}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: r.decrypted ? 'var(--green)' : 'var(--amber)' }}>
+                        {r.decrypted ? '🔓 Decrypted' : '🔒 Metadata only'}
+                      </span>
+                    </div>
+
+                    <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>{r.title}</div>
+
+                    {expiry && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: expiry.color, padding: '0.35rem 0.65rem', borderRadius: 6, marginBottom: '0.65rem', background: expiry.urgent ? 'rgba(255,68,68,0.06)' : 'rgba(255,179,0,0.05)', border: `1px solid ${expiry.urgent ? 'rgba(255,68,68,0.2)' : 'rgba(255,179,0,0.15)'}` }}>
+                        {expiry.urgent ? '🚨' : '⏰'} {expiry.label}
+                      </div>
+                    )}
+
+                    {r.decrypted && r.notes && (
+                      <div style={{ fontSize: '0.82rem', color: 'var(--text2)', lineHeight: 1.6, padding: '0.65rem', background: 'var(--s2)', borderRadius: 7, marginBottom: '0.75rem' }}>
+                        {r.notes}
+                      </div>
+                    )}
+
+                    {!r.decrypted && (
+                      <div style={{ fontSize: '0.78rem', color: 'var(--amber)', padding: '0.55rem', background: 'rgba(255,179,0,0.05)', border: '1px solid rgba(255,179,0,0.2)', borderRadius: 7, marginBottom: '0.75rem' }}>
+                        ⚠ No decryption key found. Ask the patient to grant access again.
+                      </div>
+                    )}
+
+                    <a href={`${EXPLORER}/address/${patientContract}`} target="_blank" rel="noreferrer" style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}>
+                      View on BaseScan ↗
+                    </a>
                   </div>
-
-                  <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>{r.title}</div>
-
-                  {r.decrypted && r.notes && (
-                    <div style={{
-                      fontSize: '0.82rem', color: 'var(--text2)', lineHeight: 1.6,
-                      padding: '0.65rem', background: 'var(--s2)', borderRadius: 7,
-                      marginBottom: '0.75rem',
-                    }}>
-                      {r.notes}
-                    </div>
-                  )}
-
-                  {!r.decrypted && (
-                    <div style={{
-                      fontSize: '0.78rem', color: 'var(--amber)', padding: '0.55rem',
-                      background: 'rgba(255,179,0,0.05)',
-                      border: '1px solid rgba(255,179,0,0.2)',
-                      borderRadius: 7, marginBottom: '0.75rem',
-                    }}>
-                      ⚠ No decryption key found. Ask the patient to grant access again.
-                    </div>
-                  )}
-
-                  
-                    <a href={`${EXPLORER}/address/${patientContract}`}
-                    target="_blank" rel="noreferrer"
-                    style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}
-                  >
-                    View on BaseScan ↗
-                  </a>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

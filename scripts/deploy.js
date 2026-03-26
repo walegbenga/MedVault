@@ -1,20 +1,13 @@
-// scripts/deploy.js  — ethers v6 + Hardhat compatible
-// Usage:
-//   npx hardhat run scripts/deploy.js --network base-sepolia
-//   npx hardhat run scripts/deploy.js --network base
-
 const { ethers, network, run } = require("hardhat");
 const fs   = require("fs");
 const path = require("path");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
-
-  // ethers v6 with Hardhat: use deployer.provider, not ethers.provider
   const balance = await deployer.provider.getBalance(deployer.address);
 
   console.log("─".repeat(60));
-  console.log("  MedVaultRegistry Deployment");
+  console.log("  VeriHealthRegistry Deployment");
   console.log("─".repeat(60));
   console.log(`  Network   : ${network.name} (chainId ${network.config.chainId})`);
   console.log(`  Deployer  : ${deployer.address}`);
@@ -29,21 +22,18 @@ async function main() {
     );
   }
 
-  // ── Deploy ──────────────────────────────────────────────────────────────
-  console.log("\n📦  Deploying MedVaultRegistry…");
-  const Factory  = await ethers.getContractFactory("MedVaultRegistry");
+  console.log("\n📦  Deploying VeriHealthRegistry…");
+  const Factory  = await ethers.getContractFactory("VeriHealthRegistry");
   const contract = await Factory.deploy();
   await contract.waitForDeployment();
 
   const address  = await contract.getAddress();
   const deployTx = contract.deploymentTransaction();
-
   if (!deployTx) throw new Error("deploymentTransaction() returned null");
 
   console.log(`\n✅  Deployed at : ${address}`);
   console.log(`    Tx hash     : ${deployTx.hash}`);
 
-  // ── Save deployment record ───────────────────────────────────────────────
   const deployments = loadDeployments();
   deployments[network.name] = {
     address,
@@ -55,7 +45,6 @@ async function main() {
   saveDeployments(deployments);
   console.log(`\n💾  Saved to deployments.json`);
 
-  // ── BaseScan verification ────────────────────────────────────────────────
   if (process.env.BASESCAN_API_KEY && network.name !== "hardhat") {
     console.log("\n⏳  Waiting 5 blocks before verification…");
     await deployTx.wait(5);

@@ -16,20 +16,22 @@ export function LandingPage() {
       <h1 style={{ fontFamily: 'var(--font)', fontSize: 'clamp(2.4rem, 6vw, 4.2rem)', fontWeight: 800, lineHeight: 1.08, letterSpacing: '-0.03em' }}>
         Own Your<br />
         <span style={{ background: 'linear-gradient(120deg, var(--teal), var(--blue))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}>
-          Medical Records.
+          Health Records.
         </span>
       </h1>
 
       <p style={{ maxWidth: 520, fontSize: '1.05rem', color: 'var(--text2)', lineHeight: 1.75 }}>
-        Encrypt your health records on-chain and grant wallet-scoped access to doctors, insurers, or researchers — enforced by a smart contract on {targetChain.name}.
+        VeriHealth lets you encrypt your medical records on-chain and grant
+        wallet-scoped access to doctors, insurers, or researchers —
+        enforced by a smart contract on {targetChain.name}.
       </p>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'center', maxWidth: 760 }}>
         {[
-          { icon: '🔐', title: 'Client-side Encryption', desc: 'AES-256-GCM key derived from your wallet signature. Zero server knowledge.' },
-          { icon: '📜', title: 'Live Smart Contract',    desc: 'Your personal MedVaultRegistry on Base. Grant/revoke access via real transactions.' },
-          { icon: '🌐', title: 'IPFS Storage',           desc: 'Encrypted blobs pinned to IPFS. Only the content hash lives on-chain.' },
-          { icon: '🔑', title: 'On-chain Key Exchange',  desc: 'Grantee decryption keys stored directly in the contract. No IPFS mutation needed.' },
+          { icon: '🔐', title: 'Client-side Encryption',  desc: 'AES-256-GCM key derived from your wallet signature. Zero server knowledge.' },
+          { icon: '📜', title: 'Personal Registry',        desc: 'Your own VeriHealthRegistry contract on Base. Grant and revoke access via real transactions.' },
+          { icon: '🌐', title: 'IPFS Storage',             desc: 'Encrypted blobs pinned to IPFS. Only the content hash lives on-chain.' },
+          { icon: '🔑', title: 'On-chain Key Exchange',    desc: 'Grantee decryption keys stored directly in your contract. No third-party database.' },
         ].map(f => (
           <div key={f.title} style={{ flex: '1 1 170px', maxWidth: 200, textAlign: 'left', padding: '1.1rem 1.25rem', borderRadius: 12, background: 'var(--s1)', border: '1px solid var(--border)' }}>
             <div style={{ fontSize: '1.4rem', marginBottom: '0.5rem' }}>{f.icon}</div>
@@ -41,7 +43,10 @@ export function LandingPage() {
 
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem' }}>
         <WalletButton />
-        <button onClick={() => setHowOpen(true)} style={{ fontSize: '0.85rem', color: 'var(--text3)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
+        <button
+          onClick={() => setHowOpen(true)}
+          style={{ fontSize: '0.85rem', color: 'var(--text3)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+        >
           How does it work?
         </button>
         <p style={{ fontSize: '0.75rem', color: 'var(--text3)' }}>
@@ -49,7 +54,7 @@ export function LandingPage() {
         </p>
       </div>
 
-      <Modal open={howOpen} onClose={() => setHowOpen(false)} title="🚀 How MedVault Works">
+      <Modal open={howOpen} onClose={() => setHowOpen(false)} title="🚀 How VeriHealth Works">
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem', fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.7 }}>
           {[
             {
@@ -64,23 +69,28 @@ export function LandingPage() {
             },
             {
               n: 3,
-              title: 'Deploy your registry (patients)',
-              desc: 'On first use, deploy your personal MedVaultRegistry contract to Base. One-time action — all records and grants live here.',
+              title: 'Deploy your registry',
+              desc: 'On first use, deploy your personal VeriHealthRegistry contract to Base. One-time action — all your records and grants live here permanently.',
             },
             {
               n: 4,
               title: 'Upload records',
-              desc: 'Records are encrypted in your browser with AES-256-GCM. The encrypted blob is pinned to IPFS. Only the content hash and CID go on-chain via addRecord().',
+              desc: 'Records are encrypted in your browser with AES-256-GCM. The encrypted blob is pinned to IPFS. Only the content hash and CID go on-chain.',
             },
             {
               n: 5,
               title: 'Grant selective access',
-              desc: 'The grantee signs a free message and sends you their signature. You call grantAccess() which encrypts your AES key for them and stores it directly in the contract — no IPFS re-pinning needed.',
+              desc: 'The grantee signs a free message and sends you their signature. You call grantAccess() which encrypts your AES key for them and stores it directly in your contract.',
             },
             {
               n: 6,
               title: 'Grantee views records',
-              desc: 'The grantee enters your contract address. The app fetches their key envelope from the contract, decrypts the AES key using their wallet signature, then decrypts the record content from IPFS.',
+              desc: 'The grantee enters your contract address. VeriHealth fetches their key envelope from the contract, decrypts the AES key using their wallet signature, then decrypts the record from IPFS.',
+            },
+            {
+              n: 7,
+              title: 'Update and version records',
+              desc: 'Edit any record to create a new on-chain version. Previous versions are preserved in history and never deleted.',
             },
           ].map(s => (
             <div key={s.n} style={{ display: 'flex', gap: '0.75rem' }}>

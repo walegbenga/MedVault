@@ -22,6 +22,9 @@ export interface HealthRecord {
   blockNumber: string
   encrypted: boolean
   accessCount: number
+  hasFile?: boolean   // ← add this
+  version: number        // ← add
+  previousId?: Hash      // ← add
   ts: number
 }
 

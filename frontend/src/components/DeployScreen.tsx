@@ -1,6 +1,8 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { Button } from '@/components/ui/Button'
 import { targetChain } from '@/lib/wagmi'
+import { useGasEstimate } from '@/hooks/useGasEstimate'
+import { GasEstimateTag } from '@/components/ui/GasEstimateTag'
 
 interface Props {
   deploying: boolean
@@ -17,16 +19,22 @@ const STEPS = [
 ]
 
 export function DeployScreen({ deploying, deployStep, onDeploy, error }: Props) {
+  const gas = useGasEstimate(null)
+
+  useEffect(() => {
+    gas.estimateDeploy()
+  }, [])
+
   return (
     <div style={{ minHeight: 'calc(100vh - 64px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem 1rem' }}>
       <div style={{ width: '100%', maxWidth: 520, background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 18, padding: '2rem' }}>
 
         <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.3rem', fontWeight: 700, marginBottom: '0.5rem' }}>
-          📦 Deploy Your Registry
+          📦 Deploy Your VeriHealth Registry
         </h2>
 
         <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.7, marginBottom: '0.75rem' }}>
-          Your personal <strong>MedVaultRegistry</strong> contract needs to be deployed to{' '}
+          Your personal <strong>VeriHealthRegistry</strong> contract needs to be deployed to{' '}
           <strong>{targetChain.name}</strong>. This is a one-time action — all your records,
           access grants, and encrypted key envelopes live here permanently.
         </p>
@@ -36,7 +44,7 @@ export function DeployScreen({ deploying, deployStep, onDeploy, error }: Props) 
           padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.5rem',
           background: 'rgba(0,229,204,0.05)', border: '1px solid rgba(0,229,204,0.18)',
         }}>
-          🔑 Grantee decryption keys are stored directly in this contract —
+          🔑 Grantee decryption keys are stored directly in your contract —
           no third-party database required.
         </div>
 
@@ -109,9 +117,25 @@ export function DeployScreen({ deploying, deployStep, onDeploy, error }: Props) 
           </Button>
         )}
 
-        <p style={{ fontSize: '0.72rem', textAlign: 'center', marginTop: '0.875rem', color: 'var(--text3)' }}>
-          Small gas fee required (~$0.01 on Base) · One-time only
-        </p>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          gap: '0.5rem', marginTop: '0.875rem',
+          fontSize: '0.72rem', color: 'var(--text3)',
+        }}>
+          {gas.estimates.deploy ? (
+            <>
+              Estimated cost:{' '}
+              <GasEstimateTag
+                costEth={gas.estimates.deploy.costEth}
+                costUsd={gas.estimates.deploy.costUsd}
+                loading={gas.loading.deploy ?? false}
+              />
+              {' '}· One-time only
+            </>
+          ) : (
+            'Small gas fee required · One-time only'
+          )}
+        </div>
 
       </div>
     </div>

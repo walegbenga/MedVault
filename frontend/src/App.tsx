@@ -7,12 +7,11 @@ import { LandingPage } from '@/pages/LandingPage'
 import { Dashboard } from '@/pages/Dashboard'
 import { GranteeView } from '@/pages/GranteeView'
 import { useEncryptionKey } from '@/hooks/useEncryptionKey'
-import { useSessionTimeout } from '@/hooks/useSessionTimeout'
 import { useRegistry } from '@/hooks/useRegistry'
+import { useSessionTimeout } from '@/hooks/useSessionTimeout'
 import { targetChain } from '@/lib/wagmi'
 import { getContractAddress } from '@/lib/contract'
 import type { Address } from 'viem'
-import { useIsMobile } from '@/hooks/useIsMobile'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
 
@@ -20,22 +19,20 @@ type Role = 'patient' | 'grantee' | null
 
 function AppInner() {
   const { address, isConnected, chain } = useAccount()
-  const { switchChain } = useSwitchChain()
-  const { toast } = useToast()
+  const { switchChain }                 = useSwitchChain()
+  const { toast }                       = useToast()
   const { encKey, encSig, error: encError } = useEncryptionKey()
-  const reg = useRegistry(encKey, encSig)
+  const reg                             = useRegistry(encKey, encSig)
+  const { showWarning, extendSession }  = useSessionTimeout(isConnected)
 
-  const [role, setRole]           = useState<Role>(null)
+  const [role,       setRole]       = useState<Role>(null)
   const [recovering, setRecovering] = useState(false)
-  const [recovered, setRecovered]   = useState(false)
+  const [recovered,  setRecovered]  = useState(false)
 
   const wrongChain  = isConnected && chain?.id !== targetChain.id
   const needsRole   = isConnected && !wrongChain && !role
-  const needsDeploy = isConnected && !wrongChain && role === 'patient' && !reg.contractAddress && !reg.deploying && !recovering
-
-  const { showWarning, extendSession } = useSessionTimeout(isConnected)
-
-  const isMobile = useIsMobile()
+  const needsDeploy = isConnected && !wrongChain && role === 'patient' &&
+                      !reg.contractAddress && !reg.deploying && !recovering
 
   // Reset on disconnect
   useEffect(() => {
@@ -50,24 +47,22 @@ function AppInner() {
     if (wrongChain) toast('warn', `Please switch to ${targetChain.name}.`)
   }, [wrongChain])
 
-  // Auto-recover from chain when patient connects and localStorage is empty
+  // Auto-recover from chain when localStorage is empty
   useEffect(() => {
     if (
-      !address ||
-      !isConnected ||
-      wrongChain ||
+      !address        ||
+      !isConnected    ||
+      wrongChain      ||
       role !== 'patient' ||
-      recovering ||
-      recovered ||
-      reg.records.length > 0 ||  // already have data
+      recovering      ||
+      recovered       ||
+      reg.records.length > 0 ||
       reg.deploying
     ) return
 
-    // Check if contract address exists on chain for this wallet
     const savedContract = getContractAddress(address)
-    if (!savedContract) return  // no contract yet — needs fresh deploy
+    if (!savedContract) return
 
-    // localStorage is empty but contract exists — recover from chain
     const run = async () => {
       setRecovering(true)
       try {
@@ -97,41 +92,6 @@ function AppInner() {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '0 1.5rem', gap: '1rem',
       }}>
-        {/* ── Session timeout warning ── */}
-{showWarning && (
-  <div style={{
-    position: 'fixed', bottom: isMobile ? '1rem' : '5rem',
-left: isMobile ? '1rem' : '50%',
-right: isMobile ? '1rem' : 'auto',
-transform: isMobile ? 'none' : 'translateX(-50%)',
-    zIndex: 300, display: 'flex', alignItems: 'center', gap: '1rem',
-    padding: '0.875rem 1.25rem', borderRadius: 12,
-    background: 'var(--s2)', border: '1px solid rgba(255,179,0,0.4)',
-    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-    maxWidth: 420, width: 'calc(100vw - 2rem)',
-  }}>
-    <span style={{ fontSize: '1.2rem', flexShrink: 0 }}>⏳</span>
-    <div style={{ flex: 1 }}>
-      <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--amber)', marginBottom: '0.2rem' }}>
-        Session expiring soon
-      </div>
-      <div style={{ fontSize: '0.78rem', color: 'var(--text2)' }}>
-        You'll be disconnected in 5 minutes due to inactivity.
-      </div>
-    </div>
-    <button
-      onClick={extendSession}
-      style={{
-        fontSize: '0.78rem', padding: '0.4rem 0.875rem', borderRadius: 8,
-        background: 'rgba(255,179,0,0.1)', color: 'var(--amber)',
-        border: '1px solid rgba(255,179,0,0.3)', cursor: 'pointer',
-        fontFamily: 'var(--font)', fontWeight: 600, flexShrink: 0,
-      }}
-    >
-      Stay Connected
-    </button>
-  </div>
-)}
         {/* Logo */}
         <div
           onClick={() => { if (role) setRole(null) }}
@@ -144,9 +104,10 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
           <div style={{
             width: 32, height: 32, borderRadius: 8,
             background: 'linear-gradient(135deg, var(--teal), var(--blue))',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.9rem',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: '0.9rem',
           }}>🏥</div>
-          Med<span style={{ color: 'var(--teal)' }}>Vault</span>
+          Veri<span style={{ color: 'var(--teal)' }}>Health</span>
         </div>
 
         {/* Right side */}
@@ -194,7 +155,7 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
                 color: 'var(--teal)', textDecoration: 'none',
               }}
             >
-              Registry: {reg.contractAddress.slice(0, 8)}…{reg.contractAddress.slice(-4)} ↗
+              Registry: {short(reg.contractAddress)} ↗
             </a>
           )}
 
@@ -203,7 +164,8 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
             display: 'flex', alignItems: 'center', gap: '0.4rem',
             padding: '0.3rem 0.75rem', borderRadius: 20,
             fontFamily: 'var(--mono)', fontSize: '0.7rem',
-            background: 'rgba(0,82,255,0.1)', border: '1px solid rgba(0,82,255,0.25)', color: '#6699ff',
+            background: 'rgba(0,82,255,0.1)',
+            border: '1px solid rgba(0,82,255,0.25)', color: '#6699ff',
           }}>
             <div style={{
               width: 6, height: 6, borderRadius: '50%',
@@ -212,7 +174,7 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
             {targetChain.name}
           </div>
 
-          {/* Wrong chain button */}
+          {/* Wrong chain */}
           {wrongChain && (
             <button
               onClick={() => switchChain({ chainId: targetChain.id })}
@@ -231,6 +193,40 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
         </div>
       </header>
 
+      {/* ── Session timeout warning ── */}
+      {showWarning && (
+        <div style={{
+          position: 'fixed', bottom: '5rem', left: '50%',
+          transform: 'translateX(-50%)', zIndex: 300,
+          display: 'flex', alignItems: 'center', gap: '1rem',
+          padding: '0.875rem 1.25rem', borderRadius: 12,
+          background: 'var(--s2)', border: '1px solid rgba(255,179,0,0.4)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          maxWidth: 420, width: 'calc(100vw - 2rem)',
+        }}>
+          <span style={{ fontSize: '1.2rem', flexShrink: 0 }}>⏳</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--amber)', marginBottom: '0.2rem' }}>
+              Session expiring soon
+            </div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text2)' }}>
+              You'll be disconnected in 5 minutes due to inactivity.
+            </div>
+          </div>
+          <button
+            onClick={extendSession}
+            style={{
+              fontSize: '0.78rem', padding: '0.4rem 0.875rem', borderRadius: 8,
+              background: 'rgba(255,179,0,0.1)', color: 'var(--amber)',
+              border: '1px solid rgba(255,179,0,0.3)', cursor: 'pointer',
+              fontFamily: 'var(--font)', fontWeight: 600, flexShrink: 0,
+            }}
+          >
+            Stay Connected
+          </button>
+        </div>
+      )}
+
       {/* ── Not connected ── */}
       {!isConnected && <LandingPage />}
 
@@ -242,9 +238,11 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
         }}>
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>⛓</div>
-            <div style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '0.5rem' }}>Wrong Network</div>
+            <div style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+              Wrong Network
+            </div>
             <p style={{ fontSize: '0.875rem', color: 'var(--text2)', marginBottom: '1.5rem' }}>
-              MedVault runs on {targetChain.name}.
+              VeriHealth runs on {targetChain.name}.
             </p>
             <button
               onClick={() => switchChain({ chainId: targetChain.id })}
@@ -273,15 +271,15 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
               fontFamily: 'var(--font)', fontSize: '1.6rem', fontWeight: 800,
               textAlign: 'center', marginBottom: '0.5rem',
             }}>
-              How are you using MedVault?
+              How are you using VeriHealth?
             </h2>
             <p style={{
               textAlign: 'center', fontSize: '0.875rem',
               color: 'var(--text2)', marginBottom: '2rem', lineHeight: 1.65,
             }}>
-              Choose your role. Click the MedVault logo at any time to switch.
+              Choose your role. Click the VeriHealth logo at any time to switch.
             </p>
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '1rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
               {[
                 {
                   role: 'patient' as Role,
@@ -351,10 +349,8 @@ transform: isMobile ? 'none' : 'translateX(-50%)',
               Reading your on-chain events to rebuild your record index.
               This may take a moment…
             </p>
-            <div style={{
-              display: 'flex', justifyContent: 'center', gap: '0.4rem',
-            }}>
-              {[0,1,2].map(i => (
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '0.4rem' }}>
+              {[0, 1, 2].map(i => (
                 <div key={i} style={{
                   width: 8, height: 8, borderRadius: '50%',
                   background: 'var(--teal)',

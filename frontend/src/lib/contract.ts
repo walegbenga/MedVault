@@ -1,13 +1,13 @@
 import { type Address } from 'viem'
-import artifact from './MedVaultRegistry.json'
+import artifact from './VeriHealthRegistry.json'
 
 export const CONTRACT_ABI      = artifact.abi as const
 export const CONTRACT_BYTECODE = artifact.bytecode as `0x${string}`
 
-export const blobKey = (cid: string) => `medvault_blob_${cid}`
+export const blobKey = (cid: string) => `verihealth_blob_${cid}`
 
 const contractKey = (walletAddr: string) =>
-  `medvault_contract_${walletAddr.toLowerCase()}`
+  `verihealth_contract_${walletAddr.toLowerCase()}`
 
 export function getContractAddress(walletAddr: string): Address | null {
   const saved = localStorage.getItem(contractKey(walletAddr))

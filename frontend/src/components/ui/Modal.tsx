@@ -7,9 +7,10 @@ interface Props {
   title: string
   children: React.ReactNode
   maxWidth?: number | string
+  onOpen?: () => void
 }
 
-export function Modal({ open, onClose, title, children, maxWidth = 500 }: Props) {
+export function Modal({ open, onClose, title, children, maxWidth = 500, onOpen }: Props) {
   const isMobile = useIsMobile()
 
   useEffect(() => {
@@ -18,7 +19,10 @@ export function Modal({ open, onClose, title, children, maxWidth = 500 }: Props)
     return () => document.removeEventListener('keydown', h)
   }, [open, onClose])
 
-  // Prevent body scroll when modal open
+  useEffect(() => {
+    if (open && onOpen) onOpen()
+  }, [open])
+
   useEffect(() => {
     if (open) {
       document.body.style.overflow = 'hidden'
@@ -53,27 +57,12 @@ export function Modal({ open, onClose, title, children, maxWidth = 500 }: Props)
         boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
         animation: isMobile ? 'slideUp 0.22s ease both' : 'fadeUp 0.18s ease both',
       }}>
-        {/* Drag handle on mobile */}
         {isMobile && (
-          <div style={{
-            width: 40, height: 4, borderRadius: 2,
-            background: 'var(--border2)', margin: '0.75rem auto 0',
-          }} />
+          <div style={{ width: 40, height: 4, borderRadius: 2, background: 'var(--border2)', margin: '0.75rem auto 0' }} />
         )}
-        <div style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: isMobile ? '1rem 1.25rem 0' : '1.5rem 1.5rem 0',
-        }}>
-          <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.1rem', fontWeight: 700 }}>
-            {title}
-          </h2>
-          <button onClick={onClose} style={{
-            width: 30, height: 30, borderRadius: 8,
-            border: '1px solid var(--border)',
-            background: 'var(--s2)', color: 'var(--text2)', cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: '0.9rem', minHeight: 'unset', minWidth: 'unset',
-          }}>✕</button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: isMobile ? '1rem 1.25rem 0' : '1.5rem 1.5rem 0' }}>
+          <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.1rem', fontWeight: 700 }}>{title}</h2>
+          <button onClick={onClose} style={{ width: 30, height: 30, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--s2)', color: 'var(--text2)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.9rem', minHeight: 'unset', minWidth: 'unset' }}>✕</button>
         </div>
         <div style={{ padding: isMobile ? '1rem 1.25rem 2rem' : '1.25rem 1.5rem 1.5rem' }}>
           {children}

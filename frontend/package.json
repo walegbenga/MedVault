@@ -1,6 +1,8 @@
 {
-  "name": "medvault-frontend",
+  "name": "verihealth",
   "version": "1.0.0",
+  "description": "Patient-controlled health record registry on Base. AES-256-GCM encrypted. Grant and revoke access via smart contract.",
+  "homepage": "https://verihealth.app",
   "private": true,
   "type": "module",
   "scripts": {

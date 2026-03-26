@@ -3,7 +3,7 @@ import type { HealthRecord, AccessGrant, TxEntry, AuditEntry } from './types'
 type StoreKey = 'records' | 'grants' | 'txlog' | 'audit'
 
 function key(wallet: string, k: StoreKey) {
-  return `medvault_${k}_${wallet.toLowerCase()}`
+  return `verihealth_${k}_${wallet.toLowerCase()}`
 }
 
 function load<T>(wallet: string, k: StoreKey): T[] {
@@ -33,6 +33,6 @@ export const store = {
   },
   audit: {
     load: (w: string) => load<AuditEntry>(w, 'audit'),
-    save: (w: string, d: AuditEntry[]) => save(w, 'audit', d),
+    save: (w: string, d: AuditEntry[]) => save(w, 'txlog', d),
   },
 }

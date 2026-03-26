@@ -2,15 +2,14 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title MedVaultRegistry
- * @author MedVault
+ * @title VeriHealthRegistry
+ * @author VeriHealth
  * @notice Patient-controlled health record registry on Base.
- *         Key envelopes are stored on-chain per grantee per record.
- *         No IPFS mutation required on grant — fully decentralized.
+ *         Records are stored as IPFS CIDs + keccak256 content hashes.
+ *         Access is granted/revoked per-grantee with on-chain key envelopes.
+ *         Records support versioning — updates create new versions on-chain.
  */
-contract MedVaultRegistry {
-
-    // ─── State ───────────────────────────────────────────────────────────────
+contract VeriHealthRegistry {
 
     address public owner;
 
@@ -21,6 +20,8 @@ contract MedVaultRegistry {
         string  title;
         uint256 timestamp;
         bool    active;
+        uint256 version;
+        bytes32 previousId;
     }
 
     struct KeyEnvelope {
@@ -40,18 +41,17 @@ contract MedVaultRegistry {
     bytes32[]                                           public recordIds;
     mapping(uint256 => AccessGrant)                     public grants;
     uint256                                             public grantCount;
-
-    // grantee → recordId → encrypted AES key envelope
     mapping(address => mapping(bytes32 => KeyEnvelope)) public keyEnvelopes;
-
-    // ─── Events ──────────────────────────────────────────────────────────────
+    mapping(bytes32 => bytes32)                         public latestVersion;
 
     event RecordAdded(
         bytes32 indexed id,
         string  ipfsCid,
         string  recordType,
         string  title,
-        uint256 timestamp
+        uint256 timestamp,
+        uint256 version,
+        bytes32 previousId
     );
     event RecordRemoved(bytes32 indexed id);
     event AccessGranted(
@@ -62,20 +62,16 @@ contract MedVaultRegistry {
     );
     event AccessRevoked(uint256 indexed grantId, address indexed grantee);
 
-    // ─── Modifiers ───────────────────────────────────────────────────────────
-
     modifier onlyOwner() {
-        require(msg.sender == owner, "MedVault: caller is not owner");
+        require(msg.sender == owner, "VeriHealth: caller is not owner");
         _;
     }
-
-    // ─── Constructor ─────────────────────────────────────────────────────────
 
     constructor() {
         owner = msg.sender;
     }
 
-    // ─── Record Management ───────────────────────────────────────────────────
+    // ─── Records ─────────────────────────────────────────────────────────────
 
     function addRecord(
         bytes32         id,
@@ -83,35 +79,90 @@ contract MedVaultRegistry {
         string calldata rType,
         string calldata title
     ) external onlyOwner {
-        require(!records[id].active, "MedVault: record already exists");
+        require(!records[id].active, "VeriHealth: record already exists");
         records[id] = Record({
             contentHash: id,
             ipfsCid:     cid,
             recordType:  rType,
             title:       title,
             timestamp:   block.timestamp,
-            active:      true
+            active:      true,
+            version:     1,
+            previousId:  bytes32(0)
         });
         recordIds.push(id);
-        emit RecordAdded(id, cid, rType, title, block.timestamp);
+        latestVersion[id] = id;
+        emit RecordAdded(id, cid, rType, title, block.timestamp, 1, bytes32(0));
+    }
+
+    function updateRecord(
+        bytes32         previousId,
+        bytes32         newId,
+        string calldata newCid,
+        string calldata rType,
+        string calldata title
+    ) external onlyOwner {
+        require(records[previousId].active, "VeriHealth: previous record not found");
+        require(!records[newId].active,     "VeriHealth: new record already exists");
+
+        uint256 newVersion = records[previousId].version + 1;
+        records[previousId].active = false;
+
+        records[newId] = Record({
+            contentHash: newId,
+            ipfsCid:     newCid,
+            recordType:  rType,
+            title:       title,
+            timestamp:   block.timestamp,
+            active:      true,
+            version:     newVersion,
+            previousId:  previousId
+        });
+        recordIds.push(newId);
+
+        bytes32 root = _findRoot(previousId);
+        latestVersion[root] = newId;
+
+        emit RecordAdded(newId, newCid, rType, title, block.timestamp, newVersion, previousId);
     }
 
     function removeRecord(bytes32 id) external onlyOwner {
-        require(records[id].active, "MedVault: record not found");
+        require(records[id].active, "VeriHealth: record not found");
         records[id].active = false;
         emit RecordRemoved(id);
     }
 
+    function _findRoot(bytes32 id) internal view returns (bytes32) {
+        bytes32 current = id;
+        while (records[current].previousId != bytes32(0)) {
+            current = records[current].previousId;
+        }
+        return current;
+    }
+
+    function getVersionHistory(bytes32 id)
+        external view returns (bytes32[] memory ids, uint256[] memory versions)
+    {
+        bytes32 root  = _findRoot(id);
+        uint256 count = 0;
+        for (uint256 i = 0; i < recordIds.length; i++) {
+            if (_findRoot(recordIds[i]) == root) count++;
+        }
+        ids      = new bytes32[](count);
+        versions = new uint256[](count);
+        uint256 idx = 0;
+        for (uint256 i = 0; i < recordIds.length; i++) {
+            bytes32 rid = recordIds[i];
+            if (_findRoot(rid) == root) {
+                ids[idx]      = rid;
+                versions[idx] = records[rid].version;
+                idx++;
+            }
+        }
+    }
+
     // ─── Access Control ──────────────────────────────────────────────────────
 
-    /**
-     * @notice Grant access and store encrypted AES key envelopes on-chain.
-     * @param grantee      Wallet receiving access
-     * @param rIds         Record IDs to share
-     * @param expiresAt    Unix expiry timestamp; 0 = permanent
-     * @param ciphertexts  AES key ciphertext per record (same order as rIds)
-     * @param ivs          AES key IV per record (same order as rIds)
-     */
     function grantAccess(
         address            grantee,
         bytes32[] calldata rIds,
@@ -119,10 +170,10 @@ contract MedVaultRegistry {
         string[]  calldata ciphertexts,
         string[]  calldata ivs
     ) external onlyOwner returns (uint256 grantId) {
-        require(grantee != address(0),             "MedVault: zero address");
-        require(rIds.length > 0,                   "MedVault: no records");
-        require(rIds.length == ciphertexts.length, "MedVault: length mismatch");
-        require(rIds.length == ivs.length,         "MedVault: length mismatch");
+        require(grantee != address(0),             "VeriHealth: zero address");
+        require(rIds.length > 0,                   "VeriHealth: no records");
+        require(rIds.length == ciphertexts.length, "VeriHealth: length mismatch");
+        require(rIds.length == ivs.length,         "VeriHealth: length mismatch");
 
         for (uint256 i = 0; i < rIds.length; i++) {
             keyEnvelopes[grantee][rIds[i]] = KeyEnvelope({
@@ -142,11 +193,8 @@ contract MedVaultRegistry {
         emit AccessGranted(grantId, grantee, rIds, expiresAt);
     }
 
-    /**
-     * @notice Revoke access and delete all key envelopes for this grant.
-     */
     function revokeAccess(uint256 grantId) external onlyOwner {
-        require(grants[grantId].active, "MedVault: grant not active");
+        require(grants[grantId].active, "VeriHealth: grant not active");
         AccessGrant storage g = grants[grantId];
         for (uint256 i = 0; i < g.recordIds.length; i++) {
             delete keyEnvelopes[g.grantee][g.recordIds[i]];
@@ -156,7 +204,7 @@ contract MedVaultRegistry {
         emit AccessRevoked(grantId, grantee);
     }
 
-    // ─── View Helpers ────────────────────────────────────────────────────────
+    // ─── Views ────────────────────────────────────────────────────────────────
 
     function canAccess(address grantee, bytes32 recordId)
         external view returns (bool)
@@ -173,9 +221,6 @@ contract MedVaultRegistry {
         return false;
     }
 
-    /**
-     * @notice Get the encrypted AES key envelope for a grantee + record.
-     */
     function getKeyEnvelope(address grantee, bytes32 recordId)
         external view returns (string memory ciphertext, string memory iv, bool exists)
     {
