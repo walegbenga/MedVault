@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useAccount } from 'wagmi'
+import { useAccount, usePublicClient, useWalletClient } from 'wagmi'
 import { getContract, type Address, createPublicClient, http } from 'viem'
 import { Button } from '@/components/ui/Button'
 import { Field, Input } from '@/components/ui/Field'
@@ -10,15 +10,15 @@ import { useIsMobile } from '@/hooks/useIsMobile'
 import { CONTRACT_ABI } from '@/lib/contract'
 import { decryptAesKeyFromEnvelope, decrypt } from '@/lib/crypto'
 import { fetchBlob } from '@/lib/ipfs'
+import { FileViewer } from '@/components/FileViewer'
+import { QRGrantee } from '@/components/QRGrantee'
 import { targetChain } from '@/lib/wagmi'
 import { env } from '@/env'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
 
 const rpcUrl = env.rpcUrl || (
-  env.network === 'base'
-    ? 'https://mainnet.base.org'
-    : 'https://sepolia.base.org'
+  env.network === 'base' ? 'https://mainnet.base.org' : 'https://sepolia.base.org'
 )
 
 interface SharedRecord {
@@ -29,36 +29,49 @@ interface SharedRecord {
   notes: string
   decrypted: boolean
   expiresAt: number
+  fileData: { name: string; size: number; data: string } | null
 }
 
 function getExpiryStatus(expiresAt: number): {
   label: string; color: string; urgent: boolean
 } | null {
   if (!expiresAt || expiresAt === 0) return null
-  const now      = Date.now()
+  const now       = Date.now()
   const expiresMs = expiresAt * 1000
-  const diffMs   = expiresMs - now
-  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
-  if (diffMs <= 0)      return { label: 'Expired',                    color: 'var(--red)',   urgent: true  }
-  if (diffDays <= 1)    return { label: 'Expires today',              color: 'var(--red)',   urgent: true  }
-  if (diffDays <= 3)    return { label: `Expires in ${diffDays} days`, color: 'var(--amber)', urgent: true  }
-  if (diffDays <= 7)    return { label: `Expires in ${diffDays} days`, color: 'var(--amber)', urgent: false }
-  if (diffDays <= 30)   return { label: `Expires in ${diffDays} days`, color: 'var(--text3)', urgent: false }
+  const diffMs    = expiresMs - now
+  const diffDays  = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
+  if (diffMs <= 0)    return { label: 'Expired',                     color: 'var(--red)',   urgent: true  }
+  if (diffDays <= 1)  return { label: 'Expires today',               color: 'var(--red)',   urgent: true  }
+  if (diffDays <= 3)  return { label: `Expires in ${diffDays} days`, color: 'var(--amber)', urgent: true  }
+  if (diffDays <= 7)  return { label: `Expires in ${diffDays} days`, color: 'var(--amber)', urgent: false }
+  if (diffDays <= 30) return { label: `Expires in ${diffDays} days`, color: 'var(--text3)', urgent: false }
   return { label: `Expires ${new Date(expiresMs).toLocaleDateString()}`, color: 'var(--text3)', urgent: false }
 }
 
 export function GranteeView() {
-  const { address }  = useAccount()
-  const { toast }    = useToast()
-  const isMobile     = useIsMobile()
+  const { address }           = useAccount()
+  const publicClient          = usePublicClient()
+  const { data: walletClient } = useWalletClient()
+  const { toast }             = useToast()
+  const isMobile              = useIsMobile()
   const { granteeSig, loading: sigLoading, deriveGranteeKey } = useGranteeKey()
-  const ens          = useEnsResolver()
-  const walletEnsName = useEnsName(address)
+  const ens                   = useEnsResolver()
+  const walletEnsName         = useEnsName(address)
 
   const [patientContract, setPatientContract] = useState('')
-  const [checking, setChecking] = useState(false)
-  const [records,  setRecords]  = useState<SharedRecord[]>([])
-  const [step,     setStep]     = useState<'sign' | 'enter' | 'view'>('sign')
+  const [checking,        setChecking]        = useState(false)
+  const [records,         setRecords]         = useState<SharedRecord[]>([])
+  const [step,            setStep]            = useState<'sign' | 'enter' | 'view'>('sign')
+
+  // Emergency
+  const [emergencyContract,  setEmergencyContract]  = useState('')
+  const [activatingEmergency, setActivatingEmergency] = useState(false)
+  const [showEmergencyPanel,  setShowEmergencyPanel]  = useState(false)
+
+  // File viewer
+  const [fileViewerOpen, setFileViewerOpen] = useState(false)
+  const [viewFile,       setViewFile]       = useState<{ name: string; size: number; data: string } | null>(null)
+  const [viewFileTitle,  setViewFileTitle]  = useState('')
 
   const handleSign = async () => {
     const sig = await deriveGranteeKey()
@@ -89,7 +102,6 @@ export function GranteeView() {
         client: reliableClient,
       })
 
-      // Single call — returns only accessible record IDs
       const accessibleIds = await contract.read.accessibleRecords([address]) as `0x${string}`[]
 
       if (accessibleIds.length === 0) {
@@ -99,7 +111,7 @@ export function GranteeView() {
         return
       }
 
-      // Build expiry map from grants
+      // Build expiry map
       const expiryMap: Record<string, number> = {}
       try {
         const grantCount = await contract.read.getGrantCount() as bigint
@@ -115,7 +127,7 @@ export function GranteeView() {
             expiryMap[rid.toLowerCase()] = expiresAt
           }
         }
-      } catch { /* expiry map best-effort */ }
+      } catch { /* best effort */ }
 
       // Fetch records + envelopes in parallel
       const settled = await Promise.allSettled(
@@ -136,7 +148,7 @@ export function GranteeView() {
             title      = recRaw[3] as string
             active     = recRaw[5] as boolean
           } else {
-            const r = recRaw as Record<string, unknown>
+            const r    = recRaw as Record<string, unknown>
             ipfsCid    = r.ipfsCid    as string
             recordType = r.recordType as string
             title      = r.title      as string
@@ -149,6 +161,7 @@ export function GranteeView() {
 
           let notes     = ''
           let decrypted = false
+          let fileData: SharedRecord['fileData'] = null
 
           if (exists && ciphertext && iv) {
             try {
@@ -161,6 +174,8 @@ export function GranteeView() {
                   const meta  = JSON.parse(plain)
                   notes     = meta.notes ?? ''
                   decrypted = true
+                  // Extract file if present
+                  if (blob.file) fileData = blob.file
                 }
               }
             } catch (e) {
@@ -170,7 +185,7 @@ export function GranteeView() {
 
           return {
             id: rid, ipfsCid, type: recordType, title,
-            notes, decrypted,
+            notes, decrypted, fileData,
             expiresAt: expiryMap[rid.toLowerCase()] ?? 0,
           } as SharedRecord
         })
@@ -203,12 +218,41 @@ export function GranteeView() {
     }
   }
 
+  const handleActivateEmergency = async () => {
+    if (!address || !publicClient || !walletClient) return
+    if (!/^0x[0-9a-fA-F]{40}$/.test(emergencyContract)) {
+      toast('warn', 'Enter a valid contract address.')
+      return
+    }
+    if (!window.confirm('Activate emergency access? This will be recorded on-chain.')) return
+    setActivatingEmergency(true)
+    try {
+      const contract = getContract({
+        address: emergencyContract as Address,
+        abi: CONTRACT_ABI,
+        client: { public: publicClient, wallet: walletClient },
+      })
+      const hash = await contract.write.activateEmergency([])
+      await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+      toast('ok', 'Emergency access activated. You can now view all records.')
+      setPatientContract(emergencyContract)
+      setShowEmergencyPanel(false)
+      // Proceed to record check
+      await handleCheck()
+    } catch (e: unknown) {
+      toast('err', e instanceof Error ? e.message : 'Failed to activate emergency access')
+    } finally {
+      setActivatingEmergency(false)
+    }
+  }
+
   const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`
 
   const S = {
-    card: { background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 14, padding: '1.75rem' } as React.CSSProperties,
-    infoTeal: { fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(0,229,204,0.05)', border: '1px solid rgba(0,229,204,0.18)', color: 'var(--text2)' } as React.CSSProperties,
+    card:      { background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 14, padding: '1.75rem' } as React.CSSProperties,
+    infoTeal:  { fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(0,229,204,0.05)', border: '1px solid rgba(0,229,204,0.18)', color: 'var(--text2)' } as React.CSSProperties,
     infoAmber: { fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(255,179,0,0.05)', border: '1px solid rgba(255,179,0,0.22)', color: '#ffd080' } as React.CSSProperties,
+    infoRed:   { fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(255,68,68,0.06)', border: '1px solid rgba(255,68,68,0.25)', color: '#ff9999' } as React.CSSProperties,
   }
 
   return (
@@ -227,6 +271,55 @@ export function GranteeView() {
           {' '}on <strong>{targetChain.name}</strong>.
         </p>
       </div>
+
+      {/* Emergency access toggle */}
+      <div style={{ marginBottom: '1.5rem' }}>
+        <button
+          onClick={() => setShowEmergencyPanel(p => !p)}
+          style={{
+            fontSize: '0.78rem', padding: '0.35rem 0.875rem', borderRadius: 8,
+            background: 'rgba(255,68,68,0.08)', color: '#ff9999',
+            border: '1px solid rgba(255,68,68,0.25)', cursor: 'pointer',
+            fontFamily: 'var(--font)', fontWeight: 600,
+          }}
+        >
+          🚨 Emergency Access
+        </button>
+      </div>
+
+      {/* Emergency panel */}
+      {showEmergencyPanel && (
+        <div style={{ ...S.infoRed, marginBottom: '1.5rem' }}>
+          <div style={{ fontWeight: 600, marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+            🚨 Activate Emergency Access
+          </div>
+          <p style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
+            Only use this if you are the designated emergency contact for the patient and they are incapacitated.
+            This action is recorded permanently on-chain.
+          </p>
+          <Field label="Patient Registry Contract Address">
+            <Input
+              value={emergencyContract}
+              onChange={e => setEmergencyContract(e.target.value.trim())}
+              placeholder="0x…"
+              style={{ fontFamily: 'var(--mono)', fontSize: '0.82rem' }}
+            />
+          </Field>
+          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+            <Button
+              variant="danger"
+              loading={activatingEmergency}
+              onClick={handleActivateEmergency}
+              disabled={!emergencyContract}
+            >
+              🚨 Activate Emergency Access
+            </Button>
+            <Button variant="outline" onClick={() => setShowEmergencyPanel(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Step indicator */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '2rem' }}>
@@ -299,29 +392,31 @@ export function GranteeView() {
         <div style={S.card}>
           <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Step 2: Enter the patient's contract address</h3>
           <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65, marginBottom: '1.25rem' }}>
-            Ask the patient to click <strong>"📋 Copy for Grantee"</strong> in their dashboard and send you the address. Paste it below.
+            Ask the patient to click <strong>"📋 Copy for Grantee"</strong> or <strong>"📱 Show QR"</strong> in their dashboard.
           </p>
           <div style={S.infoAmber}>
             ⚠ Make sure you are connected to <strong>{targetChain.name}</strong> before checking.
           </div>
           <Field label="Patient's Registry Contract Address or ENS" required>
-            <div style={{ position: 'relative' }}>
-              <Input
-                value={patientContract}
-                onChange={e => { setPatientContract(e.target.value.trim()); ens.reset() }}
-                onBlur={async () => {
-                  const val = patientContract.trim()
-                  if (!val || /^0x[0-9a-fA-F]{40}$/.test(val)) return
-                  const resolved = await ens.resolve(val)
-                  if (resolved) setPatientContract(resolved)
-                }}
-                placeholder="0x… or patient.eth"
-                style={{ fontFamily: 'var(--mono)', fontSize: '0.82rem', paddingRight: '3rem' }}
-              />
-              <div style={{ position: 'absolute', right: '0.75rem', top: '50%', transform: 'translateY(-50%)', fontSize: '0.72rem' }}>
-                {ens.resolving && <span style={{ width: 10, height: 10, borderRadius: '50%', border: '2px solid var(--teal)', borderTopColor: 'transparent', display: 'inline-block', animation: 'spin 0.7s linear infinite' }} />}
-                {ens.ensName && !ens.resolving && <span style={{ color: 'var(--green)' }}>✓</span>}
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <Input
+                  value={patientContract}
+                  onChange={e => { setPatientContract(e.target.value.trim()); ens.reset() }}
+                  onBlur={async () => {
+                    const val = patientContract.trim()
+                    if (!val || /^0x[0-9a-fA-F]{40}$/.test(val)) return
+                    const resolved = await ens.resolve(val)
+                    if (resolved) setPatientContract(resolved)
+                  }}
+                  placeholder="0x… or patient.eth"
+                  style={{ fontFamily: 'var(--mono)', fontSize: '0.82rem' }}
+                />
               </div>
+              <QRGrantee
+                mode="scan"
+                onScanned={addr => { setPatientContract(addr); ens.reset() }}
+              />
             </div>
             {ens.ensName && ens.resolved && (
               <div style={{ fontSize: '0.72rem', color: 'var(--text2)', marginTop: '0.35rem', fontFamily: 'var(--mono)', padding: '0.3rem 0.6rem', background: 'rgba(0,230,118,0.06)', border: '1px solid rgba(0,230,118,0.2)', borderRadius: 6 }}>
@@ -368,7 +463,7 @@ export function GranteeView() {
               <div style={{ fontSize: '0.82rem' }}>The patient hasn't granted your wallet access, or access has been revoked.</div>
             </div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))', gap: '0.9rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(300px, 1fr))', gap: '0.9rem' }}>
               {records.map((r, i) => {
                 const expiry = getExpiryStatus(r.expiresAt)
                 return (
@@ -377,8 +472,10 @@ export function GranteeView() {
                     border: `1px solid ${expiry?.urgent ? 'rgba(255,68,68,0.3)' : 'var(--border)'}`,
                     borderRadius: 12, padding: '1.1rem',
                     animation: `fadeUp 0.22s ease ${i * 0.05}s both`,
+                    display: 'flex', flexDirection: 'column', gap: '0.5rem',
                   }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.65rem' }}>
+                    {/* Type + status */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                       <span style={{ fontSize: '0.67rem', fontWeight: 700, padding: '0.18rem 0.6rem', borderRadius: 5, textTransform: 'uppercase', letterSpacing: '0.05em', background: 'rgba(0,229,204,0.1)', color: 'var(--teal)', border: '1px solid rgba(0,229,204,0.2)' }}>
                         {r.type}
                       </span>
@@ -387,27 +484,66 @@ export function GranteeView() {
                       </span>
                     </div>
 
-                    <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>{r.title}</div>
+                    {/* Title */}
+                    <div style={{ fontWeight: 600 }}>{r.title}</div>
 
+                    {/* Expiry */}
                     {expiry && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: expiry.color, padding: '0.35rem 0.65rem', borderRadius: 6, marginBottom: '0.65rem', background: expiry.urgent ? 'rgba(255,68,68,0.06)' : 'rgba(255,179,0,0.05)', border: `1px solid ${expiry.urgent ? 'rgba(255,68,68,0.2)' : 'rgba(255,179,0,0.15)'}` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: expiry.color, padding: '0.35rem 0.65rem', borderRadius: 6, background: expiry.urgent ? 'rgba(255,68,68,0.06)' : 'rgba(255,179,0,0.05)', border: `1px solid ${expiry.urgent ? 'rgba(255,68,68,0.2)' : 'rgba(255,179,0,0.15)'}` }}>
                         {expiry.urgent ? '🚨' : '⏰'} {expiry.label}
                       </div>
                     )}
 
+                    {/* Notes */}
                     {r.decrypted && r.notes && (
-                      <div style={{ fontSize: '0.82rem', color: 'var(--text2)', lineHeight: 1.6, padding: '0.65rem', background: 'var(--s2)', borderRadius: 7, marginBottom: '0.75rem' }}>
+                      <div style={{ fontSize: '0.82rem', color: 'var(--text2)', lineHeight: 1.6, padding: '0.65rem', background: 'var(--s2)', borderRadius: 7 }}>
                         {r.notes}
                       </div>
                     )}
 
+                    {/* No key */}
                     {!r.decrypted && (
-                      <div style={{ fontSize: '0.78rem', color: 'var(--amber)', padding: '0.55rem', background: 'rgba(255,179,0,0.05)', border: '1px solid rgba(255,179,0,0.2)', borderRadius: 7, marginBottom: '0.75rem' }}>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--amber)', padding: '0.55rem', background: 'rgba(255,179,0,0.05)', border: '1px solid rgba(255,179,0,0.2)', borderRadius: 7 }}>
                         ⚠ No decryption key found. Ask the patient to grant access again.
                       </div>
                     )}
 
-                    <a href={`${EXPLORER}/address/${patientContract}`} target="_blank" rel="noreferrer" style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}>
+                    {/* File attachment */}
+                    {r.decrypted && r.fileData && (
+                      <button
+                        onClick={() => {
+                          setViewFile(r.fileData)
+                          setViewFileTitle(r.title)
+                          setFileViewerOpen(true)
+                        }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '0.6rem',
+                          width: '100%', padding: '0.55rem 0.75rem', borderRadius: 8,
+                          background: 'var(--s2)', border: '1px solid var(--border2)',
+                          cursor: 'pointer', textAlign: 'left' as const, transition: 'all 0.15s',
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--teal)')}
+                        onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border2)')}
+                      >
+                        <span style={{ fontSize: '1rem' }}>📎</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '0.8rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {r.fileData.name}
+                          </div>
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text3)' }}>
+                            {(r.fileData.size / 1024).toFixed(1)} KB · Click to view
+                          </div>
+                        </div>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--teal)', flexShrink: 0 }}>Open →</span>
+                      </button>
+                    )}
+
+                    {/* BaseScan link */}
+                    
+                      <a href={`${EXPLORER}/address/${patientContract}`}
+                      target="_blank" rel="noreferrer"
+                      style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}
+                    >
                       View on BaseScan ↗
                     </a>
                   </div>
@@ -417,6 +553,14 @@ export function GranteeView() {
           )}
         </div>
       )}
+
+      {/* File Viewer */}
+      <FileViewer
+        open={fileViewerOpen}
+        onClose={() => setFileViewerOpen(false)}
+        file={viewFile}
+        recordTitle={viewFileTitle}
+      />
     </div>
   )
 }

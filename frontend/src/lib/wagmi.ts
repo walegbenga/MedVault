@@ -1,9 +1,12 @@
 import { createConfig, http } from 'wagmi'
-import { base, baseSepolia } from 'wagmi/chains'
+import { base, baseSepolia, mainnet } from 'wagmi/chains'
 import { injected, walletConnect, coinbaseWallet } from '@wagmi/connectors'
 import { env } from '@/env'
 
 export const targetChain = env.network === 'base' ? base : baseSepolia
+
+// All supported chains
+export const supportedChains = [base, baseSepolia, mainnet] as const
 
 const rpcUrl = env.rpcUrl || (
   env.network === 'base'
@@ -12,7 +15,7 @@ const rpcUrl = env.rpcUrl || (
 )
 
 export const config = createConfig({
-  chains: [targetChain],
+  chains: [base, baseSepolia, mainnet],
   connectors: [
     injected({ target: 'metaMask' }),
     injected({ shimDisconnect: true }),
@@ -31,15 +34,15 @@ export const config = createConfig({
       showQrModal: true,
       relayUrl: 'wss://relay.walletconnect.com',
       rpcMap: {
-        [targetChain.id]: rpcUrl,
+        [base.id]:       'https://mainnet.base.org',
+        [baseSepolia.id]: 'https://sepolia.base.org',
+        [mainnet.id]:    'https://eth.llamarpc.com',
       },
     }),
   ],
   transports: {
-    [targetChain.id]: http(rpcUrl, {
-      batch: true,
-      retryCount: 3,
-      retryDelay: 1000,
-    }),
+    [base.id]:        http('https://mainnet.base.org',    { batch: true, retryCount: 3 }),
+    [baseSepolia.id]: http('https://sepolia.base.org',    { batch: true, retryCount: 3 }),
+    [mainnet.id]:     http('https://eth.llamarpc.com',    { batch: true, retryCount: 3 }),
   },
 })

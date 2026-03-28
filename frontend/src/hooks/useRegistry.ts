@@ -467,11 +467,41 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
     return { records: recovered, grants: recoveredGrants }
   }, [address, publicClient, addAudit])
 
+  // ── setEmergencyContact ──────────────────────────────────────────────────
+const setEmergencyContact = useCallback(async (contact: Address) => {
+  if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
+  const instance = getInstance(contractAddress)
+  const hash = await instance.write.setEmergencyContact([contact])
+  await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+  addAudit({ color: 'amber', msg: `Emergency contact set: ${contact}`, onChain: true, txHash: hash })
+}, [address, contractAddress, publicClient, getInstance, addAudit])
+
+// ── addDelegate ───────────────────────────────────────────────────────────
+const addDelegate = useCallback(async (delegate: Address) => {
+  if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
+  const instance = getInstance(contractAddress)
+  const hash = await instance.write.addDelegate([delegate])
+  await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+  addTx({ type: 'grant', label: 'Delegate added', detail: delegate, hash, confirmed: true })
+  addAudit({ color: 'green', msg: `Delegate added: ${delegate}`, onChain: true, txHash: hash })
+}, [address, contractAddress, publicClient, getInstance, addTx, addAudit])
+
+// ── removeDelegate ────────────────────────────────────────────────────────
+const removeDelegate = useCallback(async (delegate: Address) => {
+  if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
+  const instance = getInstance(contractAddress)
+  const hash = await instance.write.removeDelegate([delegate])
+  await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+  addTx({ type: 'revoke', label: 'Delegate removed', detail: delegate, hash, confirmed: true })
+  addAudit({ color: 'red', msg: `Delegate removed: ${delegate}`, onChain: true, txHash: hash })
+}, [address, contractAddress, publicClient, getInstance, addTx, addAudit])
+
   return {
-    contractAddress, records, grants, txLog, auditLog,
-    deploying, deployStep,
-    deployRegistry, uploadRecord, updateRecord, removeRecord,
-    decryptRecord, grantAccess, revokeAccess,
-    recoverFromChain,
-  }
+  contractAddress, records, grants, txLog, auditLog,
+  deploying, deployStep,
+  deployRegistry, uploadRecord, updateRecord, removeRecord,
+  decryptRecord, grantAccess, revokeAccess,
+  setEmergencyContact, addDelegate, removeDelegate,
+  recoverFromChain,
+}
 }

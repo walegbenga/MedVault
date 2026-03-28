@@ -8,14 +8,19 @@ import { useToast } from '@/components/ui/Toast'
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { useEnsResolver } from '@/hooks/useEns'
 import { useGasEstimate } from '@/hooks/useGasEstimate'
+import { useNotifications } from '@/hooks/useNotifications'
 import { GasEstimateTag } from '@/components/ui/GasEstimateTag'
 import { FileViewer } from '@/components/FileViewer'
+import { EmergencyAccess } from '@/components/EmergencyAccess'
+import { DelegateManager } from '@/components/DelegateManager'
+import { NotificationBell } from '@/components/NotificationBell'
+import { QRGrantee } from '@/components/QRGrantee'
 import type { useRegistry } from '@/hooks/useRegistry'
 import type { HealthRecord, AccessGrant, RecordType } from '@/lib/types'
 import { targetChain } from '@/lib/wagmi'
 
 const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
-type Tab = 'records' | 'access' | 'txns' | 'audit'
+type Tab = 'records' | 'access' | 'emergency' | 'delegates' | 'txns' | 'audit'
 
 const RECORD_TYPES = ['Lab Results','Prescription','Medical Imaging','Doctor Visit','Vaccine Record','Surgery Report','Mental Health Note','Other'] as const
 const ROLES = ['Doctor','Insurer','Researcher','Emergency','Pharmacist']
@@ -36,7 +41,11 @@ const BADGE_COLORS: Record<string, { bg: string; color: string; border: string }
 
 function RecordBadge({ type }: { type: string }) {
   const c = BADGE_COLORS[type] ?? { bg: 'rgba(200,200,200,0.08)', color: 'var(--text2)', border: 'var(--border)' }
-  return <span style={{ fontSize: '0.67rem', fontWeight: 700, padding: '0.18rem 0.6rem', borderRadius: 5, textTransform: 'uppercase', letterSpacing: '0.05em', background: c.bg, color: c.color, border: `1px solid ${c.border}` }}>{type}</span>
+  return (
+    <span style={{ fontSize: '0.67rem', fontWeight: 700, padding: '0.18rem 0.6rem', borderRadius: 5, textTransform: 'uppercase', letterSpacing: '0.05em', background: c.bg, color: c.color, border: `1px solid ${c.border}` }}>
+      {type}
+    </span>
+  )
 }
 
 function Empty({ icon, title, desc }: { icon: string; title: string; desc: string }) {
@@ -62,6 +71,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
   const isMobile    = useIsMobile()
   const ens         = useEnsResolver()
   const gas         = useGasEstimate(reg.contractAddress)
+  const notif       = useNotifications(address, reg.contractAddress)
 
   const [tab, setTab] = useState<Tab>('records')
 
@@ -84,15 +94,15 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
   const [updateFile,    setUpdateFile]    = useState<File | null>(null)
 
   // Grant
-  const [grantOpen,      setGrantOpen]      = useState(false)
-  const [grantLoading,   setGrantLoading]   = useState(false)
-  const [grantForm,      setGrantForm]      = useState({ name: '', address: '', role: '', expiry: '', purpose: '', granteeSig: '' })
-  const [selectedRecords, setSelectedRecords] = useState<string[]>([])
+  const [grantOpen,       setGrantOpen]       = useState(false)
+  const [grantLoading,    setGrantLoading]     = useState(false)
+  const [grantForm,       setGrantForm]        = useState({ name: '', address: '', role: '', expiry: '', purpose: '', granteeSig: '' })
+  const [selectedRecords, setSelectedRecords]  = useState<string[]>([])
 
   // View
-  const [viewRecord, setViewRecord] = useState<HealthRecord | null>(null)
-  const [viewNotes,  setViewNotes]  = useState('')
-  const [viewFile,   setViewFile]   = useState<{ name: string; size: number; data: string } | null>(null)
+  const [viewRecord,     setViewRecord]     = useState<HealthRecord | null>(null)
+  const [viewNotes,      setViewNotes]      = useState('')
+  const [viewFile,       setViewFile]       = useState<{ name: string; size: number; data: string } | null>(null)
   const [fileViewerOpen, setFileViewerOpen] = useState(false)
 
   // Filtered records
@@ -137,56 +147,89 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
   }
 
   const handleUpload = async () => {
-    if (!uploadForm.type || !uploadForm.title || !uploadForm.date) { toast('warn', 'Fill in Type, Title, and Date.'); return }
+    if (!uploadForm.type || !uploadForm.title || !uploadForm.date) {
+      toast('warn', 'Fill in Type, Title, and Date.')
+      return
+    }
     setUploadLoading(true)
     try {
-      await reg.uploadRecord({ type: uploadForm.type as RecordType, title: uploadForm.title, provider: uploadForm.provider, date: uploadForm.date, notes: uploadForm.notes, file: uploadFile ?? undefined })
+      await reg.uploadRecord({
+        type: uploadForm.type as RecordType,
+        title: uploadForm.title,
+        provider: uploadForm.provider,
+        date: uploadForm.date,
+        notes: uploadForm.notes,
+        file: uploadFile ?? undefined,
+      })
       toast('ok', `"${uploadForm.title}" encrypted and anchored!`)
       setUploadOpen(false)
       setUploadForm({ type: '', title: '', provider: '', date: new Date().toISOString().split('T')[0], notes: '' })
       setUploadFile(null)
-    } catch (e: unknown) { toast('err', e instanceof Error ? e.message : 'Upload failed') }
-    finally { setUploadLoading(false) }
+    } catch (e: unknown) {
+      toast('err', e instanceof Error ? e.message : 'Upload failed')
+    } finally { setUploadLoading(false) }
   }
 
   const handleUpdate = async () => {
     if (!updateTarget) return
-    if (!updateForm.type || !updateForm.title || !updateForm.date) { toast('warn', 'Fill in Type, Title, and Date.'); return }
+    if (!updateForm.type || !updateForm.title || !updateForm.date) {
+      toast('warn', 'Fill in Type, Title, and Date.')
+      return
+    }
     setUpdateLoading(true)
     try {
-      await reg.updateRecord(updateTarget, { type: updateForm.type as RecordType, title: updateForm.title, provider: updateForm.provider, date: updateForm.date, notes: updateForm.notes, file: updateFile ?? undefined })
+      await reg.updateRecord(updateTarget, {
+        type: updateForm.type as RecordType,
+        title: updateForm.title,
+        provider: updateForm.provider,
+        date: updateForm.date,
+        notes: updateForm.notes,
+        file: updateFile ?? undefined,
+      })
       toast('ok', `"${updateForm.title}" updated to v${updateTarget.version + 1}!`)
       setUpdateOpen(false)
       setUpdateTarget(null)
       setUpdateFile(null)
-    } catch (e: unknown) { toast('err', e instanceof Error ? e.message : 'Update failed') }
-    finally { setUpdateLoading(false) }
+    } catch (e: unknown) {
+      toast('err', e instanceof Error ? e.message : 'Update failed')
+    } finally { setUpdateLoading(false) }
   }
 
   const handleGrant = async () => {
-    if (!grantForm.name || !grantForm.address || !grantForm.role) { toast('warn', 'Name, address, and role are required.'); return }
-
+    if (!grantForm.name || !grantForm.address || !grantForm.role) {
+      toast('warn', 'Name, address, and role are required.')
+      return
+    }
     let finalAddress = grantForm.address.trim()
     if (!(/^0x[0-9a-fA-F]{40}$/.test(finalAddress))) {
       const resolved = await ens.resolve(finalAddress)
       if (!resolved) { toast('warn', 'Invalid address or ENS name could not be resolved.'); return }
       finalAddress = resolved
     }
-
     if (selectedRecords.length === 0) { toast('warn', 'Select at least one record.'); return }
     if (!grantForm.granteeSig) { toast('warn', 'Grantee signature is required.'); return }
 
     setGrantLoading(true)
     try {
       const titles = selectedRecords.map(id => reg.records.find(r => r.id === id)?.title ?? id)
-      await reg.grantAccess({ name: grantForm.name, granteeAddress: finalAddress as Address, role: grantForm.role, purpose: grantForm.purpose, recordIds: selectedRecords as `0x${string}`[], titles, expiry: grantForm.expiry || null, granteeSig: grantForm.granteeSig })
+      await reg.grantAccess({
+        name: grantForm.name,
+        granteeAddress: finalAddress as Address,
+        role: grantForm.role,
+        purpose: grantForm.purpose,
+        recordIds: selectedRecords as `0x${string}`[],
+        titles,
+        expiry: grantForm.expiry || null,
+        granteeSig: grantForm.granteeSig,
+      })
       toast('ok', `Access granted to ${grantForm.name}!`)
       setGrantOpen(false)
       setGrantForm({ name: '', address: '', role: '', expiry: '', purpose: '', granteeSig: '' })
       setSelectedRecords([])
       ens.reset()
-    } catch (e: unknown) { toast('err', e instanceof Error ? e.message : 'Grant failed') }
-    finally { setGrantLoading(false) }
+    } catch (e: unknown) {
+      toast('err', e instanceof Error ? e.message : 'Grant failed')
+    } finally { setGrantLoading(false) }
   }
 
   const handleRevoke = async (g: AccessGrant) => {
@@ -202,35 +245,65 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
   }
 
   const exportAudit = () => {
-    const rows = ['Timestamp,OnChain,TxHash,Message', ...reg.auditLog.map(e => `"${new Date(e.ts).toISOString()}","${e.onChain}","${e.txHash ?? ''}","${e.msg.replace(/"/g, "'")}"` )]
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }))
+    const rows = [
+      'Timestamp,OnChain,TxHash,Message',
+      ...reg.auditLog.map(e =>
+        `"${new Date(e.ts).toISOString()}","${e.onChain}","${e.txHash ?? ''}","${e.msg.replace(/"/g, "'")}"`
+      )
+    ]
+    const a    = document.createElement('a')
+    a.href     = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }))
     a.download = 'verihealth-audit.csv'
     a.click()
     toast('ok', 'Exported.')
   }
 
   const short = (addr: string) => `${addr.slice(0,6)}…${addr.slice(-4)}`
+
   const TABS: { id: Tab; label: string }[] = [
-    { id: 'records', label: '📁 Records' },
-    { id: 'access',  label: '🔑 Access Control' },
-    { id: 'txns',    label: '⛓ Transactions' },
-    { id: 'audit',   label: '🕵️ Audit Log' },
+    { id: 'records',   label: '📁 Records' },
+    { id: 'access',    label: '🔑 Access' },
+    { id: 'emergency', label: '🚨 Emergency' },
+    { id: 'delegates', label: '🩺 Delegates' },
+    { id: 'txns',      label: '⛓ Transactions' },
+    { id: 'audit',     label: '🕵️ Audit' },
   ]
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto', padding: '1.5rem' }}>
 
-      {/* Top bar */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: isMobile ? 'flex-start' : 'space-between', flexDirection: isMobile ? 'column' : 'row', gap: '1rem', marginBottom: '1.5rem' }}>
+      {/* ── Top bar ── */}
+      <div style={{
+        display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start',
+        justifyContent: isMobile ? 'flex-start' : 'space-between',
+        flexDirection: isMobile ? 'column' : 'row',
+        gap: '1rem', marginBottom: '1.5rem',
+      }}>
         <div>
-          <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.6rem', fontWeight: 800, letterSpacing: '-0.02em' }}>Health Records</h2>
-          <p style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text3)', marginTop: 4 }}>{address} · {targetChain.name}</p>
+          <h2 style={{ fontFamily: 'var(--font)', fontSize: '1.6rem', fontWeight: 800, letterSpacing: '-0.02em' }}>
+            Health Records
+          </h2>
+          <p style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text3)', marginTop: 4 }}>
+            {address} · {targetChain.name}
+          </p>
         </div>
+
         {reg.contractAddress && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <a href={`${EXPLORER}/address/${reg.contractAddress}`} target="_blank" rel="noreferrer"
-              style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', padding: '0.4rem 0.85rem', borderRadius: 9, background: 'var(--s1)', border: '1px solid var(--border)', color: 'var(--teal)', textDecoration: 'none' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <NotificationBell
+              notifications={notif.notifications}
+              unreadCount={notif.unreadCount}
+              permission={notif.permission}
+              onRequestPermission={notif.requestPermission}
+              onMarkRead={notif.markRead}
+              onMarkAllRead={notif.markAllRead}
+              onClearAll={notif.clearAll}
+            />
+            
+              <a href={`${EXPLORER}/address/${reg.contractAddress}`}
+              target="_blank" rel="noreferrer"
+              style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', padding: '0.4rem 0.85rem', borderRadius: 9, background: 'var(--s1)', border: '1px solid var(--border)', color: 'var(--teal)', textDecoration: 'none' }}
+            >
               Registry: {short(reg.contractAddress)} ↗
             </a>
             <button
@@ -239,6 +312,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
             >
               📋 Copy for Grantee
             </button>
+            <QRGrantee mode="show" contractAddress={reg.contractAddress ?? ''} />
           </div>
         )}
       </div>
@@ -246,7 +320,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
       {encError && <div style={{ ...S.infoAmber, marginBottom: '1.25rem' }}>⚠ {encError}</div>}
       {!encKey && !encError && <div style={{ ...S.infoTeal, marginBottom: '1.25rem' }}>🔑 Waiting for encryption key signature…</div>}
 
-      {/* Stats */}
+      {/* ── Stats ── */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '0.875rem', marginBottom: '1.5rem' }}>
         {[
           { label: 'Records',       value: reg.records.length,  color: 'var(--teal)',  sub: 'encrypted on-chain' },
@@ -263,16 +337,20 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         ))}
       </div>
 
-      {/* Tabs */}
+      {/* ── Tabs ── */}
       <div style={{ display: 'flex', gap: '0.2rem', background: 'var(--s1)', border: '1px solid var(--border)', borderRadius: 10, padding: '0.2rem', width: isMobile ? '100%' : 'fit-content', overflowX: 'auto', marginBottom: '1.25rem' }}>
         {TABS.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{ fontFamily: 'var(--font)', fontSize: '0.82rem', fontWeight: 500, padding: '0.42rem 0.9rem', borderRadius: 7, cursor: 'pointer', background: tab === t.id ? 'var(--s3)' : 'transparent', color: tab === t.id ? 'var(--text)' : 'var(--text3)', border: tab === t.id ? '1px solid var(--border2)' : '1px solid transparent', transition: 'all 0.15s', whiteSpace: 'nowrap' }}>
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            style={{ fontFamily: 'var(--font)', fontSize: '0.82rem', fontWeight: 500, padding: '0.42rem 0.9rem', borderRadius: 7, cursor: 'pointer', background: tab === t.id ? 'var(--s3)' : 'transparent', color: tab === t.id ? 'var(--text)' : 'var(--text3)', border: tab === t.id ? '1px solid var(--border2)' : '1px solid transparent', transition: 'all 0.15s', whiteSpace: 'nowrap' }}
+          >
             {t.label}
           </button>
         ))}
       </div>
 
-      {/* RECORDS TAB */}
+      {/* ── RECORDS TAB ── */}
       {tab === 'records' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
@@ -356,7 +434,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         </div>
       )}
 
-      {/* ACCESS TAB */}
+      {/* ── ACCESS TAB ── */}
       {tab === 'access' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
@@ -378,15 +456,21 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
                     </div>
                     <div>
                       <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{g.name}</div>
-                      <div style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem', color: 'var(--text3)' }}>{short(g.address)} · {g.role} · Grant #{g.grantId}</div>
+                      <div style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem', color: 'var(--text3)' }}>
+                        {short(g.address)} · {g.role} · Grant #{g.grantId}
+                      </div>
                     </div>
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
-                    {g.titles.map(t => <span key={t} style={{ fontSize: '0.66rem', padding: '0.12rem 0.45rem', borderRadius: 4, background: 'var(--s3)', border: '1px solid var(--border2)', color: 'var(--text2)' }}>{t}</span>)}
+                    {g.titles.map(t => (
+                      <span key={t} style={{ fontSize: '0.66rem', padding: '0.12rem 0.45rem', borderRadius: 4, background: 'var(--s3)', border: '1px solid var(--border2)', color: 'var(--text2)' }}>{t}</span>
+                    ))}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                     {g.expiry && <span style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem', color: 'var(--text3)' }}>exp: {g.expiry}</span>}
-                    <a href={`${EXPLORER}/tx/${g.txHash}`} target="_blank" rel="noreferrer"><Button variant="outline" size="sm">Tx ↗</Button></a>
+                    <a href={`${EXPLORER}/tx/${g.txHash}`} target="_blank" rel="noreferrer">
+                      <Button variant="outline" size="sm">Tx ↗</Button>
+                    </a>
                     <Button
                       variant="danger" size="sm"
                       onMouseEnter={() => gas.estimateRevoke(g.grantId)}
@@ -402,7 +486,33 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         </div>
       )}
 
-      {/* TRANSACTIONS TAB */}
+      {/* ── EMERGENCY TAB ── */}
+      {tab === 'emergency' && (
+        <div>
+          <div style={{ marginBottom: '1rem' }}>
+            <h3 style={{ fontWeight: 700, marginBottom: '0.25rem' }}>Emergency Access</h3>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text2)' }}>
+              Designate a trusted wallet that can access all your records in an emergency.
+            </p>
+          </div>
+          <EmergencyAccess contractAddress={reg.contractAddress} />
+        </div>
+      )}
+
+      {/* ── DELEGATES TAB ── */}
+      {tab === 'delegates' && (
+        <div>
+          <div style={{ marginBottom: '1rem' }}>
+            <h3 style={{ fontWeight: 700, marginBottom: '0.25rem' }}>Delegate Uploaders</h3>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text2)' }}>
+              Allow trusted wallets (e.g. your doctor) to upload records on your behalf.
+            </p>
+          </div>
+          <DelegateManager contractAddress={reg.contractAddress} />
+        </div>
+      )}
+
+      {/* ── TRANSACTIONS TAB ── */}
       {tab === 'txns' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
@@ -421,10 +531,14 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
                 const icons: Record<string,string> = { deploy:'🚀', upload:'📄', grant:'🔑', revoke:'🚫', remove:'🗑' }
                 return (
                   <div key={i} style={{ ...S.card, padding: '0.8rem 1rem', display: 'flex', alignItems: 'center', gap: '0.7rem', animation: `fadeUp 0.18s ease ${i*0.03}s both` }}>
-                    <div style={{ width: 32, height: 32, borderRadius: 7, background: 'rgba(0,229,204,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem', flexShrink: 0 }}>{icons[tx.type] ?? '📄'}</div>
+                    <div style={{ width: 32, height: 32, borderRadius: 7, background: 'rgba(0,229,204,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem', flexShrink: 0 }}>
+                      {icons[tx.type] ?? '📄'}
+                    </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: '0.84rem', fontWeight: 500 }}>{tx.label} — {tx.detail}</div>
-                      <a href={`${EXPLORER}/tx/${tx.hash}`} target="_blank" rel="noreferrer" style={{ fontFamily: 'var(--mono)', fontSize: '0.67rem', color: 'var(--teal)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'none' }}>{tx.hash}</a>
+                      <a href={`${EXPLORER}/tx/${tx.hash}`} target="_blank" rel="noreferrer" style={{ fontFamily: 'var(--mono)', fontSize: '0.67rem', color: 'var(--teal)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'none' }}>
+                        {tx.hash}
+                      </a>
                     </div>
                     <div style={{ textAlign: 'right', flexShrink: 0 }}>
                       <div style={{ fontFamily: 'var(--mono)', fontSize: '0.67rem', color: 'var(--text3)' }}>{new Date(tx.ts).toLocaleTimeString()}</div>
@@ -438,7 +552,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         </div>
       )}
 
-      {/* AUDIT TAB */}
+      {/* ── AUDIT TAB ── */}
       {tab === 'audit' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
@@ -457,9 +571,15 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
                     <div style={{ width: 7, height: 7, borderRadius: '50%', background: dotColor, flexShrink: 0, marginTop: 5 }} />
                     <div style={{ flex: 1, color: 'var(--text2)', lineHeight: 1.55, wordBreak: 'break-all' }}>
                       {e.msg}
-                      {e.txHash && <a href={`${EXPLORER}/tx/${e.txHash}`} target="_blank" rel="noreferrer" style={{ marginLeft: 8, fontSize: '0.7rem', color: 'var(--teal)', textDecoration: 'none' }}>[chain ↗]</a>}
+                      {e.txHash && (
+                        <a href={`${EXPLORER}/tx/${e.txHash}`} target="_blank" rel="noreferrer" style={{ marginLeft: 8, fontSize: '0.7rem', color: 'var(--teal)', textDecoration: 'none' }}>
+                          [chain ↗]
+                        </a>
+                      )}
                     </div>
-                    <div style={{ fontFamily: 'var(--mono)', fontSize: '0.65rem', color: 'var(--text3)', flexShrink: 0 }}>{new Date(e.ts).toLocaleTimeString()}</div>
+                    <div style={{ fontFamily: 'var(--mono)', fontSize: '0.65rem', color: 'var(--text3)', flexShrink: 0 }}>
+                      {new Date(e.ts).toLocaleTimeString()}
+                    </div>
                   </div>
                 )
               })}
@@ -468,8 +588,18 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         </div>
       )}
 
-      {/* UPLOAD MODAL */}
-      <Modal open={uploadOpen} onClose={() => setUploadOpen(false)} title="📄 Upload Health Record" onOpen={() => gas.estimateUpload('0x0000000000000000000000000000000000000000000000000000000000000001', 'QmExample', uploadForm.type || 'Lab Results', uploadForm.title || 'Record')}>
+      {/* ── UPLOAD MODAL ── */}
+      <Modal
+        open={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        title="📄 Upload Health Record"
+        onOpen={() => gas.estimateUpload(
+          '0x0000000000000000000000000000000000000000000000000000000000000001',
+          'QmExample',
+          uploadForm.type || 'Lab Results',
+          uploadForm.title || 'Record'
+        )}
+      >
         <div style={S.infoTeal}>🔐 Encrypted in-browser with AES-256-GCM. Only the IPFS CID + hash go on-chain.</div>
         <Field label="Record Type" required>
           <Select value={uploadForm.type} onChange={e => setUploadForm(p => ({ ...p, type: e.target.value as RecordType }))}>
@@ -508,7 +638,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         </div>
       </Modal>
 
-      {/* UPDATE MODAL */}
+      {/* ── UPDATE MODAL ── */}
       <Modal open={updateOpen} onClose={() => setUpdateOpen(false)} title="✏️ Update Health Record">
         <div style={S.infoTeal}>📝 Creates a new version on-chain. Previous version is preserved in history.</div>
         {updateTarget && (
@@ -550,8 +680,8 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         </div>
       </Modal>
 
-      {/* GRANT MODAL */}
-      <Modal open={grantOpen} onClose={() => setGrantOpen(false)} title="🔑 Grant Record Access" onOpen={() => { if (selectedRecords.length > 0 && grantForm.granteeSig) gas.estimateGrant(grantForm.address as Address, selectedRecords as `0x${string}`[], 0n, [''], ['']) }}>
+      {/* ── GRANT MODAL ── */}
+      <Modal open={grantOpen} onClose={() => setGrantOpen(false)} title="🔑 Grant Record Access">
         <div style={S.infoTeal}>
           📜 Calls <code style={{ fontFamily: 'var(--mono)', fontSize: '0.75rem' }}>grantAccess()</code> on {targetChain.name}. The grantee's decryption key is stored on-chain.
         </div>
@@ -620,7 +750,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         <Field label="Purpose / Notes">
           <Textarea value={grantForm.purpose} placeholder="e.g. Cardiology referral…" style={{ minHeight: 55 }} onChange={e => setGrantForm(p => ({ ...p, purpose: e.target.value }))} />
         </Field>
-        <Field label="Grantee Signature" required hint="The grantee opens VeriHealth, selects 'I'm a Grantee', clicks 'Sign to Unlock', then copies and sends you the signature shown on screen.">
+        <Field label="Grantee Signature" required hint="The grantee opens VeriHealth, selects 'I'm a Grantee', clicks 'Sign to Unlock', then copies and sends you their signature.">
           <Textarea value={grantForm.granteeSig} placeholder="0x… (paste signature from grantee)" style={{ minHeight: 55, fontFamily: 'var(--mono)', fontSize: '0.72rem' }} onChange={e => setGrantForm(p => ({ ...p, granteeSig: e.target.value }))} />
         </Field>
         <div style={{ ...S.infoAmber, marginBottom: 0 }}>
@@ -637,7 +767,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         </div>
       </Modal>
 
-      {/* VIEW MODAL */}
+      {/* ── VIEW MODAL ── */}
       <Modal open={!!viewRecord} onClose={() => { setViewRecord(null); setViewFile(null) }} title="🔍 Record Details" maxWidth={540}>
         {viewRecord && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -717,7 +847,7 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
         )}
       </Modal>
 
-      {/* FILE VIEWER */}
+      {/* ── FILE VIEWER ── */}
       <FileViewer
         open={fileViewerOpen}
         onClose={() => setFileViewerOpen(false)}
