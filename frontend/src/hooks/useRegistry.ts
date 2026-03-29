@@ -496,12 +496,18 @@ const removeDelegate = useCallback(async (delegate: Address) => {
   addAudit({ color: 'red', msg: `Delegate removed: ${delegate}`, onChain: true, txHash: hash })
 }, [address, contractAddress, publicClient, getInstance, addTx, addAudit])
 
+// ── refreshFromChain ──────────────────────────────────────────────────────
+const refreshFromChain = useCallback(async () => {
+  if (!contractAddress) throw new Error('No contract deployed')
+  return recoverFromChain(contractAddress)
+}, [contractAddress, recoverFromChain])
+
   return {
   contractAddress, records, grants, txLog, auditLog,
   deploying, deployStep,
   deployRegistry, uploadRecord, updateRecord, removeRecord,
   decryptRecord, grantAccess, revokeAccess,
   setEmergencyContact, addDelegate, removeDelegate,
-  recoverFromChain,
+  recoverFromChain, refreshFromChain,
 }
 }

@@ -313,6 +313,24 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
               📋 Copy for Grantee
             </button>
             <QRGrantee mode="show" contractAddress={reg.contractAddress ?? ''} />
+            <button
+  onClick={async () => {
+    try {
+      toast('inf', 'Syncing records from chain…')
+      await reg.refreshFromChain()
+      toast('ok', 'Records synced!')
+    } catch (e: unknown) {
+      toast('err', e instanceof Error ? e.message : 'Sync failed')
+    }
+  }}
+  style={{
+    fontSize: '0.72rem', padding: '0.4rem 0.85rem', borderRadius: 9,
+    background: 'var(--s1)', border: '1px solid var(--border)',
+    color: 'var(--text2)', cursor: 'pointer', fontFamily: 'var(--font)',
+  }}
+>
+  🔄 Sync
+</button>
           </div>
         )}
       </div>
