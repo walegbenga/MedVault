@@ -1,12 +1,13 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useAccount, usePublicClient, useWalletClient } from 'wagmi'
 import { getContract, type Address, createPublicClient, http } from 'viem'
 import { keccak256, toUtf8Bytes } from 'ethers'
 import { Button } from '@/components/ui/Button'
 import { Field, Input, Select, Textarea } from '@/components/ui/Field'
 import { useToast } from '@/components/ui/Toast'
-import { useEncryptionKey } from '@/hooks/useEncryptionKey'
+import { useGranteeKey } from '@/hooks/useEncryptionKey'
 import { CONTRACT_ABI } from '@/lib/contract'
+import { decryptAesKeyFromEnvelope, encrypt } from '@/lib/crypto'
 import { pinBlob } from '@/lib/ipfs'
 import { targetChain } from '@/lib/wagmi'
 import { env } from '@/env'
@@ -30,18 +31,19 @@ interface UploadedRecord {
 }
 
 export function DelegateUploadView() {
-  const { address }            = useAccount()
-  const publicClient           = usePublicClient()
-  const { data: walletClient } = useWalletClient()
-  const { toast }              = useToast()
-  const { encKey, loading: keyLoading, derive } = useEncryptionKey()
+  const { address }             = useAccount()
+  const publicClient            = usePublicClient()
+  const { data: walletClient }  = useWalletClient()
+  const { toast }               = useToast()
+  const { granteeSig, loading: sigLoading, deriveGranteeKey } = useGranteeKey()
 
   const [patientContract,  setPatientContract]  = useState('')
   const [isDelegate,       setIsDelegate]       = useState(false)
+  const [patientAesKey,    setPatientAesKey]     = useState<CryptoKey | null>(null)
   const [checking,         setChecking]         = useState(false)
   const [uploading,        setUploading]        = useState(false)
   const [uploadedRecords,  setUploadedRecords]  = useState<UploadedRecord[]>([])
-  const [step,             setStep]             = useState<'connect' | 'upload' | 'done'>('connect')
+  const [step,             setStep]             = useState<'sign' | 'connect' | 'upload'>('sign')
 
   const [form, setForm] = useState({
     type:     '' as RecordType | '',
@@ -52,8 +54,13 @@ export function DelegateUploadView() {
   })
   const [file, setFile] = useState<File | null>(null)
 
+  const handleSign = async () => {
+    const sig = await deriveGranteeKey()
+    if (sig) setStep('connect')
+  }
+
   const handleCheck = async () => {
-    if (!address || !publicClient) return
+    if (!address || !publicClient || !granteeSig) return
     if (!/^0x[0-9a-fA-F]{40}$/.test(patientContract)) {
       toast('warn', 'Enter a valid contract address.')
       return
@@ -64,20 +71,36 @@ export function DelegateUploadView() {
         chain: targetChain,
         transport: http(rpcUrl, { batch: true, retryCount: 3 }),
       })
+
       const contract = getContract({
         address: patientContract as Address,
         abi: CONTRACT_ABI,
         client: reliableClient,
       })
+
+      // Check delegate status
       const isDel = await contract.read.delegates([address]) as boolean
       if (!isDel) {
         toast('err', 'Your wallet is not a delegate for this registry.')
-        setIsDelegate(false)
         return
       }
+
+      // Fetch delegate key envelope
+      const envelopeRaw = await contract.read.getDelegateKeyEnvelope([address]) as [string, string, boolean]
+      const [ciphertext, iv, exists] = envelopeRaw
+
+      if (!exists || !ciphertext || !iv) {
+        toast('err', 'No encryption key found for your delegate wallet. Ask the patient to re-add you as a delegate with your signature.')
+        return
+      }
+
+      // Decrypt patient's AES key using delegate's own signature
+      const aesKey = await decryptAesKeyFromEnvelope({ ciphertext, iv }, granteeSig)
+      setPatientAesKey(aesKey)
       setIsDelegate(true)
       setStep('upload')
-      toast('ok', 'Delegate access confirmed!')
+      toast('ok', 'Delegate access confirmed! You can now upload using the patient\'s encryption key.')
+
     } catch (e: unknown) {
       toast('err', e instanceof Error ? e.message : 'Failed to verify delegate status')
     } finally {
@@ -94,21 +117,17 @@ export function DelegateUploadView() {
       toast('warn', 'Fill in Type, Title, and Date.')
       return
     }
-    if (!encKey) {
-      toast('warn', 'Encryption key not ready. Please sign the message first.')
-      await derive()
+    if (!patientAesKey) {
+      toast('err', 'Patient encryption key not loaded. Please reconnect.')
       return
     }
 
     setUploading(true)
     try {
-      // Build payload
+      // Encrypt with PATIENT'S AES key — not delegate's key
       const metadata = { ...form, wallet: address, uploadedBy: 'delegate', ts: Date.now() }
-      let payload: string
-
-      const { encrypt } = await import('@/lib/crypto')
-      const encrypted = await encrypt(JSON.stringify(metadata), encKey)
-      payload = JSON.stringify({ enc: encrypted.ciphertext, iv: encrypted.iv })
+      const encrypted = await encrypt(JSON.stringify(metadata), patientAesKey)
+      let payload = JSON.stringify({ enc: encrypted.ciphertext, iv: encrypted.iv })
 
       if (file) {
         const fileData = await new Promise<string>((res, rej) => {
@@ -136,10 +155,10 @@ export function DelegateUploadView() {
       await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
 
       setUploadedRecords(prev => [...prev, {
-        id:      contentHash,
-        title:   form.title,
-        type:    form.type,
-        txHash:  hash,
+        id:     contentHash,
+        title:  form.title,
+        type:   form.type as string,
+        txHash: hash,
       }])
 
       toast('ok', `"${form.title}" uploaded to patient registry!`)
@@ -156,7 +175,7 @@ export function DelegateUploadView() {
   const EXPLORER = targetChain.blockExplorers?.default.url ?? 'https://basescan.org'
 
   const S = {
-    card: { background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 14, padding: '1.75rem' } as React.CSSProperties,
+    card:     { background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 14, padding: '1.75rem' } as React.CSSProperties,
     infoTeal: { fontSize: '0.82rem', padding: '0.65rem 0.9rem', borderRadius: 8, marginBottom: '1.25rem', background: 'rgba(0,229,204,0.05)', border: '1px solid rgba(0,229,204,0.18)', color: 'var(--text2)' } as React.CSSProperties,
   }
 
@@ -170,21 +189,85 @@ export function DelegateUploadView() {
         </h2>
         <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65 }}>
           Upload health records to a patient's registry on their behalf.
-          You must be an approved delegate.
+          Records are encrypted with the patient's key so they can read them.
         </p>
       </div>
 
-      {/* Step 1 — Enter contract */}
+      {/* Step indicator */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '2rem' }}>
+        {[
+          { n: 1, label: 'Sign to unlock', id: 'sign' },
+          { n: 2, label: 'Verify delegate', id: 'connect' },
+          { n: 3, label: 'Upload records', id: 'upload' },
+        ].map((s, i) => {
+          const isDone   = (step === 'connect' && s.id === 'sign') || (step === 'upload' && s.id !== 'upload')
+          const isActive = step === s.id
+          return (
+            <React.Fragment key={s.id}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <div style={{
+                  width: 24, height: 24, borderRadius: '50%',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '0.72rem', fontWeight: 700,
+                  background: isDone ? 'rgba(0,230,118,0.12)' : isActive ? 'rgba(0,229,204,0.12)' : 'var(--s2)',
+                  border: `1px solid ${isDone ? 'var(--green)' : isActive ? 'var(--teal)' : 'var(--border)'}`,
+                  color: isDone ? 'var(--green)' : isActive ? 'var(--teal)' : 'var(--text3)',
+                }}>
+                  {isDone ? '✓' : s.n}
+                </div>
+                <span style={{ fontSize: '0.8rem', color: isActive ? 'var(--text)' : 'var(--text3)' }}>
+                  {s.label}
+                </span>
+              </div>
+              {i < 2 && <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />}
+            </React.Fragment>
+          )
+        })}
+      </div>
+
+      {/* Step 1 — Sign */}
+      {step === 'sign' && (
+        <div style={S.card}>
+          <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Step 1: Sign to derive your key</h3>
+          <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65, marginBottom: '1.25rem' }}>
+            Sign a free message to derive your key. This signature is also what you share with the patient
+            so they can set up your delegate encryption envelope.
+          </p>
+          <div style={S.infoTeal}>🔐 Free off-chain signature. No gas spent.</div>
+          <Button onClick={handleSign} loading={sigLoading}>✍️ Sign to Unlock</Button>
+        </div>
+      )}
+
+      {/* Signature display — show after signing */}
+      {granteeSig && step !== 'sign' && (
+        <div style={{ background: 'var(--s1)', border: '1px solid var(--border2)', borderRadius: 12, padding: '1.25rem', marginBottom: '1.5rem' }}>
+          <div style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.4rem', color: 'var(--amber)' }}>
+            📋 Share this signature with the patient
+          </div>
+          <p style={{ fontSize: '0.78rem', color: 'var(--text2)', marginBottom: '0.75rem', lineHeight: 1.6 }}>
+            The patient must paste this into the "Delegate Signature" field when adding you as a delegate.
+            This allows them to share their encryption key securely with you.
+          </p>
+          <div
+            onClick={() => navigator.clipboard.writeText(granteeSig).then(() => toast('ok', 'Copied!'))}
+            style={{ fontFamily: 'var(--mono)', fontSize: '0.65rem', color: 'var(--teal)', background: 'var(--s2)', padding: '0.65rem 0.875rem', borderRadius: 7, wordBreak: 'break-all', cursor: 'pointer', border: '1px solid var(--border)' }}
+            title="Click to copy"
+          >
+            {granteeSig}
+          </div>
+          <div style={{ fontSize: '0.72rem', color: 'var(--text3)', marginTop: '0.4rem' }}>Click to copy</div>
+        </div>
+      )}
+
+      {/* Step 2 — Verify */}
       {step === 'connect' && (
         <div style={S.card}>
-          <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>
-            Step 1: Enter the patient's contract address
-          </h3>
+          <h3 style={{ fontWeight: 700, marginBottom: '0.75rem' }}>Step 2: Enter the patient's contract address</h3>
           <p style={{ fontSize: '0.875rem', color: 'var(--text2)', lineHeight: 1.65, marginBottom: '1.25rem' }}>
-            The patient must have added your wallet as a delegate from their dashboard first.
+            The patient must have added your wallet as a delegate with your signature first.
           </p>
           <div style={S.infoTeal}>
-            🩺 Delegates can upload and update records but cannot grant or revoke access.
+            🩺 Your delegate status and encryption key will be verified from the contract.
           </div>
           <Field label="Patient Registry Contract Address" required>
             <Input
@@ -200,20 +283,16 @@ export function DelegateUploadView() {
         </div>
       )}
 
-      {/* Step 2 — Upload */}
+      {/* Step 3 — Upload */}
       {step === 'upload' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
 
           {/* Confirmation banner */}
-          <div style={{
-            padding: '0.875rem 1rem', borderRadius: 10,
-            background: 'rgba(0,230,118,0.06)', border: '1px solid rgba(0,230,118,0.2)',
-            display: 'flex', alignItems: 'center', gap: '0.65rem',
-          }}>
+          <div style={{ padding: '0.875rem 1rem', borderRadius: 10, background: 'rgba(0,230,118,0.06)', border: '1px solid rgba(0,230,118,0.2)', display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
             <span style={{ fontSize: '1.2rem' }}>✅</span>
             <div>
               <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--green)' }}>
-                Delegate access confirmed
+                Delegate access confirmed · Patient key loaded
               </div>
               <div style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text3)' }}>
                 {patientContract}
@@ -221,31 +300,14 @@ export function DelegateUploadView() {
             </div>
           </div>
 
-          {/* Encryption key status */}
-          {!encKey && (
-            <div style={{
-              padding: '0.875rem 1rem', borderRadius: 10,
-              background: 'rgba(255,179,0,0.05)', border: '1px solid rgba(255,179,0,0.2)',
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              gap: '0.75rem', flexWrap: 'wrap',
-            }}>
-              <div>
-                <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--amber)' }}>
-                  🔑 Encryption key required
-                </div>
-                <div style={{ fontSize: '0.78rem', color: 'var(--text2)' }}>
-                  Sign a message to derive your encryption key before uploading.
-                </div>
-              </div>
-              <Button size="sm" loading={keyLoading} onClick={derive}>
-                ✍️ Sign to Unlock
-              </Button>
-            </div>
-          )}
-
           {/* Upload form */}
           <div style={S.card}>
             <h3 style={{ fontWeight: 700, marginBottom: '1rem' }}>Upload Record</h3>
+
+            <div style={S.infoTeal}>
+              🔐 Records are encrypted with the patient's key — only they and their grantees can read them.
+            </div>
+
             <Field label="Record Type" required>
               <Select value={form.type} onChange={e => setForm(p => ({ ...p, type: e.target.value as RecordType }))}>
                 <option value="">Select…</option>
@@ -275,10 +337,10 @@ export function DelegateUploadView() {
               </label>
             </Field>
             <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-              <Button loading={uploading} onClick={handleUpload} disabled={!encKey}>
+              <Button loading={uploading} onClick={handleUpload}>
                 📤 Upload to Patient Registry
               </Button>
-              <Button variant="outline" onClick={() => { setStep('connect'); setIsDelegate(false); setPatientContract('') }}>
+              <Button variant="outline" onClick={() => { setStep('connect'); setIsDelegate(false); setPatientContract(''); setPatientAesKey(null) }}>
                 Change Patient
               </Button>
             </div>
@@ -292,21 +354,12 @@ export function DelegateUploadView() {
               </h4>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 {uploadedRecords.map(r => (
-                  <div key={r.id} style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '0.6rem 0.875rem', borderRadius: 8,
-                    background: 'var(--s2)', border: '1px solid var(--border)',
-                    gap: '0.5rem', flexWrap: 'wrap',
-                  }}>
+                  <div key={r.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.875rem', borderRadius: 8, background: 'var(--s2)', border: '1px solid var(--border)', gap: '0.5rem', flexWrap: 'wrap' }}>
                     <div>
                       <div style={{ fontSize: '0.85rem', fontWeight: 500 }}>{r.title}</div>
                       <div style={{ fontSize: '0.72rem', color: 'var(--text3)' }}>{r.type}</div>
                     </div>
-                    
-                      <a href={`${EXPLORER}/tx/${r.txHash}`}
-                      target="_blank" rel="noreferrer"
-                      style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}
-                    >
+                    <a href={`${EXPLORER}/tx/${r.txHash}`} target="_blank" rel="noreferrer" style={{ fontSize: '0.72rem', color: 'var(--teal)', textDecoration: 'none' }}>
                       View Tx ↗
                     </a>
                   </div>

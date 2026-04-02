@@ -518,17 +518,17 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
       )}
 
       {/* ── DELEGATES TAB ── */}
-      {tab === 'delegates' && (
-        <div>
-          <div style={{ marginBottom: '1rem' }}>
-            <h3 style={{ fontWeight: 700, marginBottom: '0.25rem' }}>Delegate Uploaders</h3>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text2)' }}>
-              Allow trusted wallets (e.g. your doctor) to upload records on your behalf.
-            </p>
-          </div>
-          <DelegateManager contractAddress={reg.contractAddress} />
-        </div>
-      )}
+{tab === 'delegates' && (
+  <div>
+    <div style={{ marginBottom: '1rem' }}>
+      <h3 style={{ fontWeight: 700, marginBottom: '0.25rem' }}>Delegate Uploaders</h3>
+      <p style={{ fontSize: '0.82rem', color: 'var(--text2)' }}>
+        Allow trusted wallets (e.g. your doctor) to upload records on your behalf.
+      </p>
+    </div>
+    <DelegateManager contractAddress={reg.contractAddress} encKey={encKey} />
+  </div>
+)}
 
       {/* ── TRANSACTIONS TAB ── */}
       {tab === 'txns' && (

@@ -329,12 +329,55 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
   }, [address, contractAddress, publicClient, grants, getInstance, addTx, addAudit])
 
   // ── recoverFromChain ──────────────────────────────────────────────────────
-  const recoverFromChain = useCallback(async (contractAddr: Address) => {
-    if (!address || !publicClient) throw new Error('Not connected')
+const recoverFromChain = useCallback(async (contractAddr: Address) => {
+  if (!address || !publicClient) throw new Error('Not connected')
 
-    const recordLogs = await publicClient.getLogs({
-      address: contractAddr,
-      event: {
+  const client      = publicClient
+  const latestBlock = await client.getBlockNumber()
+  const CHUNK_SIZE  = 9_000n
+
+  type AbiEventDef = {
+    type: 'event'
+    name: string
+    inputs: readonly {
+      name: string
+      type: string
+      indexed?: boolean
+    }[]
+  }
+
+  async function fetchAllLogs(event: AbiEventDef): Promise<unknown[]> {
+    const allLogs: unknown[] = []
+    let fromBlock = 0n
+
+    while (fromBlock <= latestBlock) {
+      const toBlock = fromBlock + CHUNK_SIZE > latestBlock
+        ? latestBlock
+        : fromBlock + CHUNK_SIZE
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const chunk = await (client.getLogs as any)({
+          address: contractAddr,
+          event,
+          fromBlock,
+          toBlock,
+        })
+        allLogs.push(...chunk)
+      } catch (e) {
+        console.warn(`Log chunk failed [${fromBlock}-${toBlock}]:`, e)
+      }
+
+      fromBlock = toBlock + 1n
+    }
+
+    return allLogs
+  }
+
+  try {
+    const [recordLogs, removedLogs, grantLogs, revokedLogs] = await Promise.all([
+
+      fetchAllLogs({
         type: 'event',
         name: 'RecordAdded',
         inputs: [
@@ -346,25 +389,17 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
           { indexed: false, name: 'version',    type: 'uint256' },
           { indexed: false, name: 'previousId', type: 'bytes32' },
         ],
-      },
-      fromBlock: 0n,
-      toBlock: 'latest',
-    })
+      }),
 
-    const removedLogs = await publicClient.getLogs({
-      address: contractAddr,
-      event: {
+      fetchAllLogs({
         type: 'event',
         name: 'RecordRemoved',
-        inputs: [{ indexed: true, name: 'id', type: 'bytes32' }],
-      },
-      fromBlock: 0n,
-      toBlock: 'latest',
-    })
+        inputs: [
+          { indexed: true, name: 'id', type: 'bytes32' },
+        ],
+      }),
 
-    const grantLogs = await publicClient.getLogs({
-      address: contractAddr,
-      event: {
+      fetchAllLogs({
         type: 'event',
         name: 'AccessGranted',
         inputs: [
@@ -373,47 +408,71 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
           { indexed: false, name: 'recordIds', type: 'bytes32[]' },
           { indexed: false, name: 'expiresAt', type: 'uint256'   },
         ],
-      },
-      fromBlock: 0n,
-      toBlock: 'latest',
-    })
+      }),
 
-    const revokedLogs = await publicClient.getLogs({
-      address: contractAddr,
-      event: {
+      fetchAllLogs({
         type: 'event',
         name: 'AccessRevoked',
         inputs: [
           { indexed: true, name: 'grantId', type: 'uint256' },
           { indexed: true, name: 'grantee', type: 'address' },
         ],
-      },
-      fromBlock: 0n,
-      toBlock: 'latest',
-    })
+      }),
 
+    ])
+
+    // Build removed set
     const removedIds = new Set(
-      removedLogs.map(l => (l.topics[1] as string).toLowerCase())
+      (removedLogs as unknown[]).map(l => {
+        const log = l as { topics: string[] }
+        return log.topics[1].toLowerCase()
+      })
     )
 
-    const recovered: HealthRecord[] = recordLogs
-      .filter(l => !removedIds.has((l.topics[1] as string).toLowerCase()))
+    // Build revoked set
+    const revokedIds = new Set(
+      (revokedLogs as unknown[]).map(l => {
+        const log = l as { topics: string[] }
+        return log.topics[1].toLowerCase()
+      })
+    )
+
+    // Rebuild records
+    const recovered: HealthRecord[] = (recordLogs as unknown[])
+      .filter(l => {
+        const log = l as { topics: string[] }
+        return !removedIds.has(log.topics[1].toLowerCase())
+      })
       .map(l => {
-        const id        = l.topics[1] as Hash
-        const ipfsCid   = l.args.ipfsCid    as string
-        const type      = l.args.recordType as RecordType
-        const title     = l.args.title      as string
-        const timestamp = Number(l.args.timestamp as bigint) * 1000
-        const version   = Number(l.args.version   as bigint)
-        const prevId    = l.args.previousId as string
+        const log = l as {
+          args: {
+            ipfsCid: string
+            recordType: string
+            title: string
+            timestamp: bigint
+            version: bigint
+            previousId: string
+          }
+          topics: string[]
+          transactionHash: `0x${string}`
+          blockNumber: bigint
+        }
+
+        const id        = log.topics[1] as Hash
+        const ipfsCid   = log.args.ipfsCid
+        const type      = log.args.recordType as RecordType
+        const title     = log.args.title
+        const timestamp = Number(log.args.timestamp) * 1000
+        const version   = Number(log.args.version)
+        const prevId    = log.args.previousId
 
         return serialize({
           id, ipfsCid, type, title,
           provider:    'Unknown',
           date:        new Date(timestamp).toISOString().split('T')[0],
           notes:       '',
-          txHash:      l.transactionHash as Hash,
-          blockNumber: l.blockNumber.toString(),
+          txHash:      (log.transactionHash ?? '0x') as Hash,
+          blockNumber: (log.blockNumber ?? 0n).toString(),
           encrypted:   true,
           accessCount: 0,
           hasFile:     false,
@@ -425,17 +484,27 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
         }) as HealthRecord
       })
 
-    const revokedIds = new Set(
-      revokedLogs.map(l => (l.topics[1] as string).toLowerCase())
-    )
-
-    const recoveredGrants: AccessGrant[] = grantLogs
-      .filter(l => !revokedIds.has((l.topics[1] as string).toLowerCase()))
+    // Rebuild grants
+    const recoveredGrants: AccessGrant[] = (grantLogs as unknown[])
+      .filter(l => {
+        const log = l as { topics: string[] }
+        return !revokedIds.has(log.topics[1].toLowerCase())
+      })
       .map(l => {
-        const grantId   = Number(l.topics[1] as string)
-        const grantee   = l.topics[2] as Address
-        const recordIds = l.args.recordIds as Hash[]
-        const expiresAt = (l.args.expiresAt as bigint).toString()
+        const log = l as {
+          args: {
+            recordIds: Hash[]
+            expiresAt: bigint
+          }
+          topics: string[]
+          transactionHash: `0x${string}`
+          blockNumber: bigint
+        }
+
+        const grantId   = Number(log.topics[1])
+        const grantee   = log.topics[2] as Address
+        const recordIds = log.args.recordIds as Hash[]
+        const expiresAt = log.args.expiresAt.toString()
 
         return serialize({
           grantId,
@@ -447,8 +516,8 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
           titles:      recordIds.map(r => r.slice(0, 10) + '…'),
           expiry:      null,
           expiresAt,
-          txHash:      l.transactionHash as Hash,
-          blockNumber: l.blockNumber.toString(),
+          txHash:      (log.transactionHash ?? '0x') as Hash,
+          blockNumber: (log.blockNumber ?? 0n).toString(),
           ts:          Date.now(),
         }) as AccessGrant
       })
@@ -459,13 +528,20 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
     setGrants(recoveredGrants)
 
     addAudit({
-      color: 'teal',
-      msg: `Recovered ${recovered.length} record(s) and ${recoveredGrants.length} grant(s) from chain`,
+      color:   'teal',
+      msg:     `Recovered ${recovered.length} record(s) and ${recoveredGrants.length} grant(s) from chain`,
       onChain: false,
     })
 
+    console.log('Recovery complete:', recovered.length, 'records,', recoveredGrants.length, 'grants')
     return { records: recovered, grants: recoveredGrants }
-  }, [address, publicClient, addAudit])
+
+  } catch (e) {
+    console.error('Recovery failed:', e)
+    throw e
+  }
+}, [address, publicClient, addAudit])
+
 
   // ── setEmergencyContact ──────────────────────────────────────────────────
 const setEmergencyContact = useCallback(async (contact: Address) => {

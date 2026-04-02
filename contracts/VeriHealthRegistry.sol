@@ -80,6 +80,7 @@ contract VeriHealthRegistry {
     event EmergencyDeactivated(uint256 timestamp);
     event DelegateAdded(address indexed delegate);
     event DelegateRemoved(address indexed delegate);
+    event DelegateKeyEnvelopeSet(address indexed delegate);
 
     // ─── Modifiers ───────────────────────────────────────────────────────────
 
@@ -385,4 +386,30 @@ contract VeriHealthRegistry {
     {
         return grants[grantId].recordIds;
     }
+
+    // delegate → patient AES key envelope
+mapping(address => KeyEnvelope) public delegateKeyEnvelopes;
+
+/// @notice Store encrypted AES key envelope for a delegate
+function setDelegateKeyEnvelope(
+    address         delegate,
+    string calldata ciphertext,
+    string calldata iv
+) external onlyOwner {
+    require(delegates[delegate], "VeriHealth: not a delegate");
+    delegateKeyEnvelopes[delegate] = KeyEnvelope({
+        ciphertext: ciphertext,
+        iv:         iv,
+        exists:     true
+    });
+    emit DelegateKeyEnvelopeSet(delegate);
+}
+
+/// @notice Get the key envelope for a delegate
+function getDelegateKeyEnvelope(address delegate)
+    external view returns (string memory ciphertext, string memory iv, bool exists)
+{
+    KeyEnvelope storage e = delegateKeyEnvelopes[delegate];
+    return (e.ciphertext, e.iv, e.exists);
+}
 }
