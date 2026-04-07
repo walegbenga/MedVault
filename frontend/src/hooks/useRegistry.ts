@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { useAccount, usePublicClient, useWalletClient } from 'wagmi'
 import { getContract, parseEventLogs, type Address, type Hash } from 'viem'
 import { keccak256, toUtf8Bytes } from 'ethers'
@@ -19,6 +19,9 @@ function serialize<T>(obj: T): T {
   ))
 }
 
+const RECOVERED_KEY = (addr: string) =>
+  `verihealth_recovered_${addr.toLowerCase()}`
+
 export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
   const { address } = useAccount()
   const publicClient = usePublicClient()
@@ -33,6 +36,14 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
   const [auditLog,   setAuditLog]   = useState<AuditEntry[]>(  () => address ? store.audit.load(address)   : [])
   const [deploying,  setDeploying]  = useState(false)
   const [deployStep, setDeployStep] = useState(0)
+
+  // Refs — always fresh values without stale closures
+  const isSyncingRef     = useRef(false)
+  const recordsLengthRef = useRef(records.length)
+
+  useEffect(() => {
+    recordsLengthRef.current = records.length
+  }, [records.length])
 
   const addTx = useCallback((entry: Omit<TxEntry, 'ts'>) => {
     setTxLog(prev => {
@@ -76,6 +87,8 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
       const addr = receipt.contractAddress
       saveContractAddress(address, addr)
       setContractAddress(addr)
+      // Mark as recovered immediately — new registry is empty, no scan needed
+      localStorage.setItem(RECOVERED_KEY(address), '1')
       addTx({ type: 'deploy', label: 'Registry deployed', detail: addr, hash, confirmed: true })
       addAudit({ color: 'teal', msg: `Registry deployed at ${addr} | block ${receipt.blockNumber.toString()}`, onChain: true, txHash: hash })
       return addr
@@ -328,262 +341,292 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
     addAudit({ color: 'red', msg: `Access revoked: ${g?.name} (${g?.role}) | block ${receipt.blockNumber.toString()}`, onChain: true, txHash: hash })
   }, [address, contractAddress, publicClient, grants, getInstance, addTx, addAudit])
 
+  // ── setEmergencyContact ───────────────────────────────────────────────────
+  const setEmergencyContact = useCallback(async (contact: Address) => {
+    if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
+    const instance = getInstance(contractAddress)
+    const hash = await instance.write.setEmergencyContact([contact])
+    await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+    addAudit({ color: 'amber', msg: `Emergency contact set: ${contact}`, onChain: true, txHash: hash })
+  }, [address, contractAddress, publicClient, getInstance, addAudit])
+
+  // ── addDelegate ───────────────────────────────────────────────────────────
+  const addDelegate = useCallback(async (delegate: Address) => {
+    if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
+    const instance = getInstance(contractAddress)
+    const hash = await instance.write.addDelegate([delegate])
+    await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+    addTx({ type: 'grant', label: 'Delegate added', detail: delegate, hash, confirmed: true })
+    addAudit({ color: 'green', msg: `Delegate added: ${delegate}`, onChain: true, txHash: hash })
+  }, [address, contractAddress, publicClient, getInstance, addTx, addAudit])
+
+  // ── removeDelegate ────────────────────────────────────────────────────────
+  const removeDelegate = useCallback(async (delegate: Address) => {
+    if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
+    const instance = getInstance(contractAddress)
+    const hash = await instance.write.removeDelegate([delegate])
+    await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
+    addTx({ type: 'revoke', label: 'Delegate removed', detail: delegate, hash, confirmed: true })
+    addAudit({ color: 'red', msg: `Delegate removed: ${delegate}`, onChain: true, txHash: hash })
+  }, [address, contractAddress, publicClient, getInstance, addTx, addAudit])
+
   // ── recoverFromChain ──────────────────────────────────────────────────────
-const recoverFromChain = useCallback(async (contractAddr: Address) => {
-  if (!address || !publicClient) throw new Error('Not connected')
+  // silent=false → first login, sets RECOVERED_KEY, shows recovery screen via App.tsx
+  // silent=true  → background sync, never touches RECOVERED_KEY, never shows screen
+  const recoverFromChain = useCallback(async (
+    contractAddr: Address,
+    silent = false
+  ) => {
+    if (!address || !publicClient) throw new Error('Not connected')
 
-  const client      = publicClient
-  const latestBlock = await client.getBlockNumber()
-  const CHUNK_SIZE  = 9_000n
+    const client      = publicClient
+    const latestBlock = await client.getBlockNumber()
+    const CHUNK_SIZE  = 9_000n
 
-  type AbiEventDef = {
-    type: 'event'
-    name: string
-    inputs: readonly {
+    type AbiEventDef = {
+      type: 'event'
       name: string
-      type: string
-      indexed?: boolean
-    }[]
-  }
-
-  async function fetchAllLogs(event: AbiEventDef): Promise<unknown[]> {
-    const allLogs: unknown[] = []
-    let fromBlock = 0n
-
-    while (fromBlock <= latestBlock) {
-      const toBlock = fromBlock + CHUNK_SIZE > latestBlock
-        ? latestBlock
-        : fromBlock + CHUNK_SIZE
-
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const chunk = await (client.getLogs as any)({
-          address: contractAddr,
-          event,
-          fromBlock,
-          toBlock,
-        })
-        allLogs.push(...chunk)
-      } catch (e) {
-        console.warn(`Log chunk failed [${fromBlock}-${toBlock}]:`, e)
-      }
-
-      fromBlock = toBlock + 1n
+      inputs: readonly { name: string; type: string; indexed?: boolean }[]
     }
 
-    return allLogs
-  }
-
-  try {
-    const [recordLogs, removedLogs, grantLogs, revokedLogs] = await Promise.all([
-
-      fetchAllLogs({
-        type: 'event',
-        name: 'RecordAdded',
-        inputs: [
-          { indexed: true,  name: 'id',         type: 'bytes32' },
-          { indexed: false, name: 'ipfsCid',    type: 'string'  },
-          { indexed: false, name: 'recordType', type: 'string'  },
-          { indexed: false, name: 'title',      type: 'string'  },
-          { indexed: false, name: 'timestamp',  type: 'uint256' },
-          { indexed: false, name: 'version',    type: 'uint256' },
-          { indexed: false, name: 'previousId', type: 'bytes32' },
-        ],
-      }),
-
-      fetchAllLogs({
-        type: 'event',
-        name: 'RecordRemoved',
-        inputs: [
-          { indexed: true, name: 'id', type: 'bytes32' },
-        ],
-      }),
-
-      fetchAllLogs({
-        type: 'event',
-        name: 'AccessGranted',
-        inputs: [
-          { indexed: true,  name: 'grantId',   type: 'uint256'   },
-          { indexed: true,  name: 'grantee',   type: 'address'   },
-          { indexed: false, name: 'recordIds', type: 'bytes32[]' },
-          { indexed: false, name: 'expiresAt', type: 'uint256'   },
-        ],
-      }),
-
-      fetchAllLogs({
-        type: 'event',
-        name: 'AccessRevoked',
-        inputs: [
-          { indexed: true, name: 'grantId', type: 'uint256' },
-          { indexed: true, name: 'grantee', type: 'address' },
-        ],
-      }),
-
-    ])
-
-    // Build removed set
-    const removedIds = new Set(
-      (removedLogs as unknown[]).map(l => {
-        const log = l as { topics: string[] }
-        return log.topics[1].toLowerCase()
-      })
-    )
-
-    // Build revoked set
-    const revokedIds = new Set(
-      (revokedLogs as unknown[]).map(l => {
-        const log = l as { topics: string[] }
-        return log.topics[1].toLowerCase()
-      })
-    )
-
-    // Rebuild records
-    const recovered: HealthRecord[] = (recordLogs as unknown[])
-      .filter(l => {
-        const log = l as { topics: string[] }
-        return !removedIds.has(log.topics[1].toLowerCase())
-      })
-      .map(l => {
-        const log = l as {
-          args: {
-            ipfsCid: string
-            recordType: string
-            title: string
-            timestamp: bigint
-            version: bigint
-            previousId: string
-          }
-          topics: string[]
-          transactionHash: `0x${string}`
-          blockNumber: bigint
+    async function fetchAllLogs(event: AbiEventDef): Promise<unknown[]> {
+      const allLogs: unknown[] = []
+      let fromBlock = 0n
+      while (fromBlock <= latestBlock) {
+        const toBlock = fromBlock + CHUNK_SIZE > latestBlock
+          ? latestBlock
+          : fromBlock + CHUNK_SIZE
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const chunk = await (client.getLogs as any)({
+            address: contractAddr,
+            event,
+            fromBlock,
+            toBlock,
+          })
+          allLogs.push(...chunk)
+        } catch (e) {
+          console.warn(`Log chunk failed [${fromBlock}-${toBlock}]:`, e)
         }
+        fromBlock = toBlock + 1n
+      }
+      return allLogs
+    }
 
-        const id        = log.topics[1] as Hash
-        const ipfsCid   = log.args.ipfsCid
-        const type      = log.args.recordType as RecordType
-        const title     = log.args.title
-        const timestamp = Number(log.args.timestamp) * 1000
-        const version   = Number(log.args.version)
-        const prevId    = log.args.previousId
+    try {
+      const [recordLogs, removedLogs, grantLogs, revokedLogs] = await Promise.all([
+        fetchAllLogs({
+          type: 'event', name: 'RecordAdded',
+          inputs: [
+            { indexed: true,  name: 'id',         type: 'bytes32' },
+            { indexed: false, name: 'ipfsCid',    type: 'string'  },
+            { indexed: false, name: 'recordType', type: 'string'  },
+            { indexed: false, name: 'title',      type: 'string'  },
+            { indexed: false, name: 'timestamp',  type: 'uint256' },
+            { indexed: false, name: 'version',    type: 'uint256' },
+            { indexed: false, name: 'previousId', type: 'bytes32' },
+          ],
+        }),
+        fetchAllLogs({
+          type: 'event', name: 'RecordRemoved',
+          inputs: [{ indexed: true, name: 'id', type: 'bytes32' }],
+        }),
+        fetchAllLogs({
+          type: 'event', name: 'AccessGranted',
+          inputs: [
+            { indexed: true,  name: 'grantId',   type: 'uint256'   },
+            { indexed: true,  name: 'grantee',   type: 'address'   },
+            { indexed: false, name: 'recordIds', type: 'bytes32[]' },
+            { indexed: false, name: 'expiresAt', type: 'uint256'   },
+          ],
+        }),
+        fetchAllLogs({
+          type: 'event', name: 'AccessRevoked',
+          inputs: [
+            { indexed: true, name: 'grantId', type: 'uint256' },
+            { indexed: true, name: 'grantee', type: 'address' },
+          ],
+        }),
+      ])
 
-        return serialize({
-          id, ipfsCid, type, title,
-          provider:    'Unknown',
-          date:        new Date(timestamp).toISOString().split('T')[0],
-          notes:       '',
-          txHash:      (log.transactionHash ?? '0x') as Hash,
-          blockNumber: (log.blockNumber ?? 0n).toString(),
-          encrypted:   true,
-          accessCount: 0,
-          hasFile:     false,
-          version,
-          previousId:  prevId === '0x0000000000000000000000000000000000000000000000000000000000000000'
-                         ? undefined
-                         : prevId as Hash,
-          ts: timestamp,
-        }) as HealthRecord
-      })
+      const removedIds = new Set(
+        (removedLogs as unknown[]).map(l => {
+          const log = l as { topics: string[] }
+          return log.topics[1].toLowerCase()
+        })
+      )
 
-    // Rebuild grants
-    const recoveredGrants: AccessGrant[] = (grantLogs as unknown[])
-      .filter(l => {
-        const log = l as { topics: string[] }
-        return !revokedIds.has(log.topics[1].toLowerCase())
-      })
-      .map(l => {
-        const log = l as {
-          args: {
-            recordIds: Hash[]
-            expiresAt: bigint
+      const revokedIds = new Set(
+        (revokedLogs as unknown[]).map(l => {
+          const log = l as { topics: string[] }
+          return log.topics[1].toLowerCase()
+        })
+      )
+
+      const recovered: HealthRecord[] = (recordLogs as unknown[])
+        .filter(l => {
+          const log = l as { topics: string[] }
+          return !removedIds.has(log.topics[1].toLowerCase())
+        })
+        .map(l => {
+          const log = l as {
+            args: {
+              ipfsCid: string
+              recordType: string
+              title: string
+              timestamp: bigint
+              version: bigint
+              previousId: string
+            }
+            topics: string[]
+            transactionHash: `0x${string}`
+            blockNumber: bigint
           }
-          topics: string[]
-          transactionHash: `0x${string}`
-          blockNumber: bigint
-        }
+          const id        = log.topics[1] as Hash
+          const ipfsCid   = log.args.ipfsCid
+          const type      = log.args.recordType as RecordType
+          const title     = log.args.title
+          const timestamp = Number(log.args.timestamp) * 1000
+          const version   = Number(log.args.version)
+          const prevId    = log.args.previousId
+          return serialize({
+            id, ipfsCid, type, title,
+            provider:    'Unknown',
+            date:        new Date(timestamp).toISOString().split('T')[0],
+            notes:       '',
+            txHash:      (log.transactionHash ?? '0x') as Hash,
+            blockNumber: (log.blockNumber ?? 0n).toString(),
+            encrypted:   true,
+            accessCount: 0,
+            hasFile:     false,
+            version,
+            previousId:  prevId === '0x0000000000000000000000000000000000000000000000000000000000000000'
+                           ? undefined
+                           : prevId as Hash,
+            ts: timestamp,
+          }) as HealthRecord
+        })
 
-        const grantId   = Number(log.topics[1])
-        const grantee   = log.topics[2] as Address
-        const recordIds = log.args.recordIds as Hash[]
-        const expiresAt = log.args.expiresAt.toString()
+      const recoveredGrants: AccessGrant[] = (grantLogs as unknown[])
+        .filter(l => {
+          const log = l as { topics: string[] }
+          return !revokedIds.has(log.topics[1].toLowerCase())
+        })
+        .map(l => {
+          const log = l as {
+            args: { recordIds: Hash[]; expiresAt: bigint }
+            topics: string[]
+            transactionHash: `0x${string}`
+            blockNumber: bigint
+          }
+          const grantId   = Number(log.topics[1])
+          const grantee   = log.topics[2] as Address
+          const recordIds = log.args.recordIds as Hash[]
+          const expiresAt = log.args.expiresAt.toString()
+          return serialize({
+            grantId,
+            name:        grantee,
+            address:     grantee,
+            role:        'Unknown',
+            purpose:     '',
+            recordIds,
+            titles:      recordIds.map(r => r.slice(0, 10) + '…'),
+            expiry:      null,
+            expiresAt,
+            txHash:      (log.transactionHash ?? '0x') as Hash,
+            blockNumber: (log.blockNumber ?? 0n).toString(),
+            ts:          Date.now(),
+          }) as AccessGrant
+        })
 
-        return serialize({
-          grantId,
-          name:        grantee,
-          address:     grantee,
-          role:        'Unknown',
-          purpose:     '',
-          recordIds,
-          titles:      recordIds.map(r => r.slice(0, 10) + '…'),
-          expiry:      null,
-          expiresAt,
-          txHash:      (log.transactionHash ?? '0x') as Hash,
-          blockNumber: (log.blockNumber ?? 0n).toString(),
-          ts:          Date.now(),
-        }) as AccessGrant
+      store.records.save(address, recovered)
+      store.grants.save(address, recoveredGrants)
+      setRecords(recovered)
+      setGrants(recoveredGrants)
+
+      // Update ref immediately so poll sees the new count right away
+      recordsLengthRef.current = recovered.length
+
+      if (!silent) {
+        localStorage.setItem(RECOVERED_KEY(address), '1')
+        addAudit({
+          color:   'teal',
+          msg:     `Recovered ${recovered.length} record(s) and ${recoveredGrants.length} grant(s) from chain`,
+          onChain: false,
+        })
+      }
+
+      console.log(`${silent ? 'Silent sync' : 'Recovery'} complete:`, recovered.length, 'records')
+      return { records: recovered, grants: recoveredGrants }
+
+    } catch (e) {
+      if (!silent) {
+        console.error('Recovery failed:', e)
+        throw e
+      } else {
+        console.warn('Silent sync failed (non-fatal):', e)
+        return { records: [], grants: [] }
+      }
+    }
+  }, [address, publicClient, addAudit])
+
+  // ── refreshFromChain ──────────────────────────────────────────────────────
+  const refreshFromChain = useCallback(async () => {
+    if (!contractAddress || !address) throw new Error('No contract deployed')
+    if (isSyncingRef.current) {
+      console.log('Sync already in progress — skipping')
+      return
+    }
+    isSyncingRef.current = true
+    try {
+      return await recoverFromChain(contractAddress, true)
+    } finally {
+      isSyncingRef.current = false
+    }
+  }, [contractAddress, address, recoverFromChain])
+
+  // ── pollForUpdates ────────────────────────────────────────────────────────
+  const pollForUpdates = useCallback(async () => {
+    if (!contractAddress || !publicClient || !address) return
+    if (isSyncingRef.current) return
+    try {
+      const contract = getContract({
+        address: contractAddress,
+        abi: CONTRACT_ABI,
+        client: publicClient,
       })
+      const onChainCount = await contract.read.getRecordCount() as bigint
+      const currentLocal = recordsLengthRef.current
 
-    store.records.save(address, recovered)
-    store.grants.save(address, recoveredGrants)
-    setRecords(recovered)
-    setGrants(recoveredGrants)
+      if (Number(onChainCount) > currentLocal) {
+        console.log(`New records: chain=${onChainCount} local=${currentLocal} — silent sync`)
+        isSyncingRef.current = true
+        try {
+          await recoverFromChain(contractAddress, true)
+        } finally {
+          isSyncingRef.current = false
+        }
+      }
+    } catch {
+      isSyncingRef.current = false
+    }
+  }, [contractAddress, publicClient, address, recoverFromChain])
 
-    addAudit({
-      color:   'teal',
-      msg:     `Recovered ${recovered.length} record(s) and ${recoveredGrants.length} grant(s) from chain`,
-      onChain: false,
-    })
-
-    console.log('Recovery complete:', recovered.length, 'records,', recoveredGrants.length, 'grants')
-    return { records: recovered, grants: recoveredGrants }
-
-  } catch (e) {
-    console.error('Recovery failed:', e)
-    throw e
-  }
-}, [address, publicClient, addAudit])
-
-
-  // ── setEmergencyContact ──────────────────────────────────────────────────
-const setEmergencyContact = useCallback(async (contact: Address) => {
-  if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
-  const instance = getInstance(contractAddress)
-  const hash = await instance.write.setEmergencyContact([contact])
-  await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
-  addAudit({ color: 'amber', msg: `Emergency contact set: ${contact}`, onChain: true, txHash: hash })
-}, [address, contractAddress, publicClient, getInstance, addAudit])
-
-// ── addDelegate ───────────────────────────────────────────────────────────
-const addDelegate = useCallback(async (delegate: Address) => {
-  if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
-  const instance = getInstance(contractAddress)
-  const hash = await instance.write.addDelegate([delegate])
-  await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
-  addTx({ type: 'grant', label: 'Delegate added', detail: delegate, hash, confirmed: true })
-  addAudit({ color: 'green', msg: `Delegate added: ${delegate}`, onChain: true, txHash: hash })
-}, [address, contractAddress, publicClient, getInstance, addTx, addAudit])
-
-// ── removeDelegate ────────────────────────────────────────────────────────
-const removeDelegate = useCallback(async (delegate: Address) => {
-  if (!address || !publicClient || !contractAddress) throw new Error('Not connected')
-  const instance = getInstance(contractAddress)
-  const hash = await instance.write.removeDelegate([delegate])
-  await publicClient.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 })
-  addTx({ type: 'revoke', label: 'Delegate removed', detail: delegate, hash, confirmed: true })
-  addAudit({ color: 'red', msg: `Delegate removed: ${delegate}`, onChain: true, txHash: hash })
-}, [address, contractAddress, publicClient, getInstance, addTx, addAudit])
-
-// ── refreshFromChain ──────────────────────────────────────────────────────
-const refreshFromChain = useCallback(async () => {
-  if (!contractAddress) throw new Error('No contract deployed')
-  return recoverFromChain(contractAddress)
-}, [contractAddress, recoverFromChain])
+  // Poll every 15 seconds
+  // Intentionally omitting pollForUpdates from deps to prevent interval restart on every render
+  useEffect(() => {
+    if (!contractAddress || !address) return
+    const interval = setInterval(pollForUpdates, 15_000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contractAddress, address])
 
   return {
-  contractAddress, records, grants, txLog, auditLog,
-  deploying, deployStep,
-  deployRegistry, uploadRecord, updateRecord, removeRecord,
-  decryptRecord, grantAccess, revokeAccess,
-  setEmergencyContact, addDelegate, removeDelegate,
-  recoverFromChain, refreshFromChain,
-}
+    contractAddress, records, grants, txLog, auditLog,
+    deploying, deployStep,
+    deployRegistry, uploadRecord, updateRecord, removeRecord,
+    decryptRecord, grantAccess, revokeAccess,
+    setEmergencyContact, addDelegate, removeDelegate,
+    recoverFromChain, refreshFromChain,
+  }
 }

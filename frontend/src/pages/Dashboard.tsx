@@ -105,6 +105,10 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
   const [viewFile,       setViewFile]       = useState<{ name: string; size: number; data: string } | null>(null)
   const [fileViewerOpen, setFileViewerOpen] = useState(false)
 
+  // Add this state at the top of Dashboard
+const [lastSync, setLastSync] = useState<number | null>(null)
+const [syncing,  setSyncing]  = useState(false)
+
   // Filtered records
   const filteredRecords = useMemo(() => {
     let result = [...reg.records]
@@ -313,23 +317,31 @@ export function Dashboard({ encKey, encSig, encError, reg }: Props) {
               📋 Copy for Grantee
             </button>
             <QRGrantee mode="show" contractAddress={reg.contractAddress ?? ''} />
-            <button
+<button
   onClick={async () => {
+    setSyncing(true)
     try {
-      toast('inf', 'Syncing records from chain…')
       await reg.refreshFromChain()
+      setLastSync(Date.now())
       toast('ok', 'Records synced!')
     } catch (e: unknown) {
       toast('err', e instanceof Error ? e.message : 'Sync failed')
+    } finally {
+      setSyncing(false)
     }
   }}
   style={{
     fontSize: '0.72rem', padding: '0.4rem 0.85rem', borderRadius: 9,
     background: 'var(--s1)', border: '1px solid var(--border)',
     color: 'var(--text2)', cursor: 'pointer', fontFamily: 'var(--font)',
+    display: 'flex', alignItems: 'center', gap: '0.4rem',
   }}
 >
-  🔄 Sync
+  <span style={{
+    display: 'inline-block',
+    animation: syncing ? 'spin 0.7s linear infinite' : 'none',
+  }}>🔄</span>
+  {syncing ? 'Syncing…' : lastSync ? `Synced ${Math.floor((Date.now() - lastSync) / 1000)}s ago` : 'Sync'}
 </button>
           </div>
         )}
