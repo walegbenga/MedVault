@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAccount, usePublicClient, useWalletClient } from 'wagmi'
 import { getContract, parseEventLogs, type Address, type Hash } from 'viem'
 import { keccak256, toUtf8Bytes } from 'ethers'
@@ -37,10 +37,13 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
   const [deploying,  setDeploying]  = useState(false)
   const [deployStep, setDeployStep] = useState(0)
 
-  // Refs — always fresh values without stale closures
+  // Refs — always fresh, never stale
   const isSyncingRef     = useRef(false)
   const recordsLengthRef = useRef(records.length)
+  const pollRef          = useRef<() => Promise<void>>()
+  const recoverRef       = useRef<typeof recoverFromChain | null>(null)
 
+  // Keep recordsLengthRef in sync
   useEffect(() => {
     recordsLengthRef.current = records.length
   }, [records.length])
@@ -544,7 +547,7 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
       setRecords(recovered)
       setGrants(recoveredGrants)
 
-      // Update ref immediately so poll sees the new count right away
+      // Update ref immediately so poll sees fresh count right away
       recordsLengthRef.current = recovered.length
 
       if (!silent) {
@@ -570,6 +573,11 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
     }
   }, [address, publicClient, addAudit])
 
+  // Keep recoverRef always pointing to latest version
+  useEffect(() => {
+    recoverRef.current = recoverFromChain
+  })
+
   // ── refreshFromChain ──────────────────────────────────────────────────────
   const refreshFromChain = useCallback(async () => {
     if (!contractAddress || !address) throw new Error('No contract deployed')
@@ -579,46 +587,48 @@ export function useRegistry(encKey: CryptoKey | null, encSig?: string | null) {
     }
     isSyncingRef.current = true
     try {
-      return await recoverFromChain(contractAddress, true)
+      return await recoverRef.current!(contractAddress, true)
     } finally {
       isSyncingRef.current = false
     }
-  }, [contractAddress, address, recoverFromChain])
+  }, [contractAddress, address])
 
-  // ── pollForUpdates ────────────────────────────────────────────────────────
-  const pollForUpdates = useCallback(async () => {
-    if (!contractAddress || !publicClient || !address) return
-    if (isSyncingRef.current) return
-    try {
-      const contract = getContract({
-        address: contractAddress,
-        abi: CONTRACT_ABI,
-        client: publicClient,
-      })
-      const onChainCount = await contract.read.getRecordCount() as bigint
-      const currentLocal = recordsLengthRef.current
+  // ── pollRef — updated every render so interval always has fresh version ───
+  useEffect(() => {
+    pollRef.current = async () => {
+      if (!contractAddress || !publicClient || !address) return
+      if (isSyncingRef.current) return
+      try {
+        const contract = getContract({
+          address: contractAddress,
+          abi: CONTRACT_ABI,
+          client: publicClient,
+        })
+        const onChainCount = await contract.read.getRecordCount() as bigint
+        const currentLocal = recordsLengthRef.current
 
-      if (Number(onChainCount) > currentLocal) {
-        console.log(`New records: chain=${onChainCount} local=${currentLocal} — silent sync`)
-        isSyncingRef.current = true
-        try {
-          await recoverFromChain(contractAddress, true)
-        } finally {
-          isSyncingRef.current = false
+        if (Number(onChainCount) > currentLocal) {
+          console.log(`New records: chain=${onChainCount} local=${currentLocal} — silent sync`)
+          isSyncingRef.current = true
+          try {
+            await recoverRef.current!(contractAddress, true)
+          } finally {
+            isSyncingRef.current = false
+          }
         }
+      } catch {
+        isSyncingRef.current = false
       }
-    } catch {
-      isSyncingRef.current = false
     }
-  }, [contractAddress, publicClient, address, recoverFromChain])
+  })
 
-  // Poll every 15 seconds
-  // Intentionally omitting pollForUpdates from deps to prevent interval restart on every render
+  // ── Polling interval — only restarts when contract or address changes ─────
   useEffect(() => {
     if (!contractAddress || !address) return
-    const interval = setInterval(pollForUpdates, 15_000)
+    const interval = setInterval(() => {
+      pollRef.current?.()
+    }, 15_000)
     return () => clearInterval(interval)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contractAddress, address])
 
   return {
